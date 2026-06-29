@@ -2099,6 +2099,20 @@ pub const CAPI = struct {
         ptr.focusCallback(focused);
     }
 
+    /// Deliver the result of a native platform color picker to the surface.
+    export fn ghostty_surface_color_picker_result(
+        ptr: *Surface,
+        r: u8,
+        g: u8,
+        b: u8,
+    ) void {
+        ptr.core_surface.handleMessage(.{ .color_picker_result = .{
+            .r = r,
+            .g = g,
+            .b = b,
+        } }) catch {};
+    }
+
     /// Sets the window background blur on macOS to the desired value.
     /// I do this in Zig as an extern function because I don't know how to
     /// call these functions in Swift.

@@ -108,6 +108,13 @@ pub const Message = union(enum) {
     /// Selected search index change
     search_selected: ?usize,
 
+    /// Result from a native platform color picker.
+    color_picker_result: struct {
+        r: u8,
+        g: u8,
+        b: u8,
+    },
+
     pub const ReportTitleStyle = enum {
         csi_21_t,
 

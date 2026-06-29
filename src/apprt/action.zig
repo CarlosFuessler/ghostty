@@ -268,6 +268,11 @@ pub const Action = union(Key) {
     /// such as OSC 10/11.
     color_change: ColorChange,
 
+    /// Open the native platform color picker with an initial RGB color.
+    /// The app runtime should call back with `color_picker_result` message
+    /// on the surface.
+    open_color_picker: OpenColorPicker,
+
     /// A request to reload the configuration. The reload request can be
     /// from a user or for some internal reason. The reload request may
     /// request it is a soft reload or a full reload. See the struct for
@@ -400,6 +405,7 @@ pub const Action = union(Key) {
         key_sequence,
         key_table,
         color_change,
+        open_color_picker,
         reload_config,
         config_change,
         close_window,
@@ -840,6 +846,12 @@ pub const KeyTable = union(enum) {
             },
         };
     }
+};
+
+pub const OpenColorPicker = extern struct {
+    r: u8,
+    g: u8,
+    b: u8,
 };
 
 pub const ColorChange = extern struct {

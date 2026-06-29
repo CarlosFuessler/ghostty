@@ -789,6 +789,13 @@ typedef enum {
   GHOSTTY_ACTION_COLOR_KIND_CURSOR = -3,
 } ghostty_action_color_kind_e;
 
+// apprt.action.OpenColorPicker
+typedef struct {
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
+} ghostty_action_open_color_picker_s;
+
 // apprt.action.ColorChange
 typedef struct {
   ghostty_action_color_kind_e kind;
@@ -931,6 +938,7 @@ typedef enum {
   GHOSTTY_ACTION_KEY_SEQUENCE,
   GHOSTTY_ACTION_KEY_TABLE,
   GHOSTTY_ACTION_COLOR_CHANGE,
+  GHOSTTY_ACTION_OPEN_COLOR_PICKER,
   GHOSTTY_ACTION_RELOAD_CONFIG,
   GHOSTTY_ACTION_CONFIG_CHANGE,
   GHOSTTY_ACTION_CLOSE_WINDOW,
@@ -980,6 +988,7 @@ typedef union {
   ghostty_action_key_sequence_s key_sequence;
   ghostty_action_key_table_s key_table;
   ghostty_action_color_change_s color_change;
+  ghostty_action_open_color_picker_s open_color_picker;
   ghostty_action_reload_config_s reload_config;
   ghostty_action_config_change_s config_change;
   ghostty_action_open_url_s open_url;
@@ -1201,6 +1210,8 @@ GHOSTTY_API bool ghostty_inspector_metal_shutdown(ghostty_inspector_t);
 // APIs I'd like to get rid of eventually but are still needed for now.
 // Don't use these unless you know what you're doing.
 GHOSTTY_API void ghostty_set_window_background_blur(ghostty_app_t, void*);
+
+GHOSTTY_API void ghostty_surface_color_picker_result(ghostty_surface_t, uint8_t r, uint8_t g, uint8_t b);
 
 // Benchmark API, if available.
 GHOSTTY_API bool ghostty_benchmark_cli(const char*, const char*);
