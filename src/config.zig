@@ -38,6 +38,7 @@ pub const RepeatableCodepointMap = Config.RepeatableCodepointMap;
 pub const RepeatableFontVariation = Config.RepeatableFontVariation;
 pub const RepeatableString = Config.RepeatableString;
 pub const RepeatableStringMap = @import("config/RepeatableStringMap.zig");
+pub const ThemeMeta = @import("config/ThemeMeta.zig");
 pub const RepeatablePath = Config.RepeatablePath;
 pub const Path = Config.Path;
 pub const ShellIntegrationFeatures = Config.ShellIntegrationFeatures;
