@@ -151,11 +151,11 @@ pub const ThemeMeta = struct {
         try self.save();
     }
 
-    pub fn isFavorite(self: *ThemeMeta, name: []const u8) bool {
+    pub fn isFavorite(self: *const ThemeMeta, name: []const u8) bool {
         return self.favorites.contains(name);
     }
 
-    pub fn isCreation(self: *ThemeMeta, name: []const u8) bool {
+    pub fn isCreation(self: *const ThemeMeta, name: []const u8) bool {
         return self.creations.contains(name);
     }
 };
