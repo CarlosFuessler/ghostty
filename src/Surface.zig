@@ -308,7 +308,10 @@ const ThemePicker = struct {
         self.filtered.deinit(self.alloc);
         self.saved_cells.deinit(self.alloc);
         if (self.base_config) |*cfg| cfg.deinit();
-        if (self.meta) |*m| m.deinit();
+        if (self.meta) |*m| {
+            m.deinit();
+            self.alloc.free(m.path);
+        }
         self.* = undefined;
     }
 };
@@ -942,10 +945,9 @@ fn themePickerHandleKey(self: *Surface, event: input.KeyEvent) !void {
                 try self.themePickerFilter();
                 picker.selected = 0;
                 picker.scroll_offset = 0;
-                try self.themePickerRender();
-                return;
+            } else {
+                picker.opacity = @max(0.15, picker.opacity - 0.05);
             }
-            picker.opacity = @max(0.15, picker.opacity - 0.05);
         },
 
         .arrow_right => {
@@ -958,10 +960,9 @@ fn themePickerHandleKey(self: *Surface, event: input.KeyEvent) !void {
                 try self.themePickerFilter();
                 picker.selected = 0;
                 picker.scroll_offset = 0;
-                try self.themePickerRender();
-                return;
+            } else {
+                picker.opacity = @min(1.0, picker.opacity + 0.05);
             }
-            picker.opacity = @min(1.0, picker.opacity + 0.05);
         },
 
         else => {

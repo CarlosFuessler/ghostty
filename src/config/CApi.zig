@@ -141,6 +141,23 @@ export fn ghostty_config_open_path() String {
     return .fromSlice(path);
 }
 
+/// Set the theme on a configuration. This clears any existing theme
+/// and sets the new one. The theme name must be null-terminated.
+export fn ghostty_config_set_theme(self: *Config, theme: [*:0]const u8) void {
+    var arena = self._arena orelse return;
+    const alloc = arena.allocator();
+    const name = std.mem.sliceTo(theme, 0);
+    const light = alloc.dupeZ(u8, name) catch return;
+    const dark = alloc.dupeZ(u8, name) catch return;
+    self.theme = Config.Theme{ .light = light, .dark = dark };
+}
+
+/// Clear the theme from a configuration so that finalize will not
+/// attempt to load a theme.
+export fn ghostty_config_clear_theme(self: *Config) void {
+    self.theme = null;
+}
+
 /// Sync with ghostty_diagnostic_s
 const Diagnostic = extern struct {
     message: [*:0]const u8 = "",

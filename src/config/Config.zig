@@ -6909,6 +6909,13 @@ pub const Keybinds = struct {
             .toggle_command_palette,
         );
 
+        // Theme picker: super+shift+t
+        try self.set.put(
+            alloc,
+            .{ .key = .{ .physical = .key_t }, .mods = inputpkg.ctrlOrSuper(.{ .shift = true }) },
+            .toggle_theme_picker,
+        );
+
         // Mac-specific keyboard bindings.
         if (comptime builtin.target.os.tag.isDarwin()) {
             try self.set.put(

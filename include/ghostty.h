@@ -895,6 +895,7 @@ typedef enum {
   GHOSTTY_ACTION_TOGGLE_WINDOW_DECORATIONS,
   GHOSTTY_ACTION_TOGGLE_QUICK_TERMINAL,
   GHOSTTY_ACTION_TOGGLE_COMMAND_PALETTE,
+  GHOSTTY_ACTION_TOGGLE_THEME_PICKER,
   GHOSTTY_ACTION_TOGGLE_VISIBILITY,
   GHOSTTY_ACTION_TOGGLE_BACKGROUND_OPACITY,
   GHOSTTY_ACTION_MOVE_TAB,
@@ -1083,6 +1084,8 @@ GHOSTTY_API bool ghostty_config_key_is_binding(ghostty_config_t, ghostty_input_k
 GHOSTTY_API uint32_t ghostty_config_diagnostics_count(ghostty_config_t);
 GHOSTTY_API ghostty_diagnostic_s ghostty_config_get_diagnostic(ghostty_config_t, uint32_t);
 GHOSTTY_API ghostty_string_s ghostty_config_open_path(void);
+GHOSTTY_API void ghostty_config_set_theme(ghostty_config_t, const char*);
+GHOSTTY_API void ghostty_config_clear_theme(ghostty_config_t);
 
 GHOSTTY_API ghostty_app_t ghostty_app_new(const ghostty_runtime_config_s*,
                                              ghostty_config_t);
