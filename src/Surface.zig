@@ -296,6 +296,7 @@ const ThemePicker = struct {
         opacity: f64,
         focused_field: usize,
         pending_color_picker: ?usize,
+        hex_input: ?std.ArrayList(u8) = null,
     };
 
     fn deinit(self: *ThemePicker) void {
@@ -311,6 +312,10 @@ const ThemePicker = struct {
         if (self.meta) |*m| {
             m.deinit();
             self.alloc.free(m.path);
+        }
+        if (self.creator) |*c| {
+            c.name.deinit(self.alloc);
+            if (c.hex_input) |*h| h.deinit(self.alloc);
         }
         self.* = undefined;
     }
@@ -520,6 +525,12 @@ fn themePickerRestoreCells(self: *Surface, picker: *ThemePicker) void {
 /// Render the theme picker in the terminal.
 fn themePickerRender(self: *Surface) !void {
     const picker = self.theme_picker orelse return;
+
+    if (picker.mode == .creator) {
+        try self.themePickerRenderCreator();
+        return;
+    }
+
     const grid = self.size.grid();
     const cols: usize = @intCast(grid.columns);
     const rows: usize = @intCast(grid.rows);
@@ -821,6 +832,11 @@ fn themePickerHandleKey(self: *Surface, event: input.KeyEvent) !void {
     if (self.theme_picker == null) return;
     var picker = &(self.theme_picker.?);
 
+    if (picker.mode == .creator) {
+        try self.themePickerHandleKeyCreator(event);
+        return;
+    }
+
     switch (event.key) {
         .escape => {
             // Restore original config before closing
@@ -935,6 +951,15 @@ fn themePickerHandleKey(self: *Surface, event: input.KeyEvent) !void {
             picker.scroll_offset = 0;
         },
 
+        .tab => {
+            picker.mode = if (picker.mode == .browse) .creator else .browse;
+            if (picker.mode == .creator and picker.creator == null) {
+                try self.themePickerInitCreator();
+            }
+            try self.themePickerRender();
+            return;
+        },
+
         .arrow_left => {
             if (picker.mode == .browse) {
                 const tag = @intFromEnum(picker.sort_tab);
@@ -1016,7 +1041,9 @@ fn themePickerFilter(self: *Surface) !void {
             while (ti < tn.len and qi < query.len) {
                 const tc = std.ascii.toLower(tn[ti]);
                 const qc = std.ascii.toLower(query[qi]);
-                if (tc == qc) { qi += 1; }
+                if (tc == qc) {
+                    qi += 1;
+                }
                 ti += 1;
             }
             if (qi == query.len) {
@@ -1088,6 +1115,399 @@ fn themePickerApply(self: *Surface, theme: ThemePicker.ThemeEntry) void {
     log.info("applying theme: {s}", .{theme.name});
     self.themePickerPreview(theme);
     self.themePickerClose();
+}
+
+/// Initialize the creator state by loading the currently selected theme's colors.
+fn themePickerInitCreator(self: *Surface) !void {
+    const picker = &(self.theme_picker orelse return);
+    if (picker.filtered.items.len == 0) return;
+    const idx = picker.filtered.items[picker.selected];
+    const theme = picker.themes[idx];
+
+    var config = try picker.base_config.?.clone(self.alloc);
+    defer config.deinit();
+    try config.loadFile(self.alloc, theme.path);
+    try config.finalize();
+
+    const Color = ThemePicker.CreatorState.Color;
+    const bg: Color = .{ config.background.r, config.background.g, config.background.b };
+    const fg: Color = .{ config.foreground.r, config.foreground.g, config.foreground.b };
+
+    const cursor_color: Color = if (config.@"cursor-color") |c|
+        if (c == .color) .{ c.color.r, c.color.g, c.color.b } else fg
+    else
+        fg;
+
+    const cursor_text: Color = if (config.@"cursor-text") |c|
+        if (c == .color) .{ c.color.r, c.color.g, c.color.b } else bg
+    else
+        bg;
+
+    const sel_bg: Color = if (config.@"selection-background") |c|
+        if (c == .color) .{ c.color.r, c.color.g, c.color.b } else bg
+    else
+        fg;
+
+    const sel_fg: Color = if (config.@"selection-foreground") |c|
+        if (c == .color) .{ c.color.r, c.color.g, c.color.b } else fg
+    else
+        bg;
+
+    var palette: [16]Color = undefined;
+    for (0..16) |i| {
+        const p = config.palette.value[i];
+        palette[i] = .{ p.r, p.g, p.b };
+    }
+
+    const name_noext = if (std.mem.lastIndexOf(u8, theme.name, ".")) |dot|
+        theme.name[0..dot]
+    else
+        theme.name;
+
+    var name_list = std.ArrayList(u8){};
+    try name_list.appendSlice(self.alloc, name_noext);
+
+    picker.creator = ThemePicker.CreatorState{
+        .name = name_list,
+        .background = bg,
+        .foreground = fg,
+        .palette = palette,
+        .cursor_color = cursor_color,
+        .cursor_text = cursor_text,
+        .selection_bg = sel_bg,
+        .selection_fg = sel_fg,
+        .opacity = config.@"background-opacity",
+        .focused_field = 0,
+        .pending_color_picker = null,
+    };
+}
+
+/// Render the creator mode form instead of the theme list.
+fn themePickerRenderCreator(self: *Surface) !void {
+    const picker = &(self.theme_picker orelse return);
+    const creator = &(picker.creator orelse return);
+    const grid = self.size.grid();
+    const cols: usize = @intCast(grid.columns);
+    const rows: usize = @intCast(grid.rows);
+    const start_row: usize = picker.start_row;
+    const content_width = @min(cols, @as(usize, 60));
+    const start_col = (cols -| content_width) / 2;
+    const pages = &self.io.terminal.screens.active.pages;
+
+    // Clear all picker rows
+    {
+        var r: usize = 0;
+        while (r < picker.height) : (r += 1) {
+            const row_idx = start_row + r;
+            if (row_idx >= rows) break;
+            var c: usize = 0;
+            while (c < cols) : (c += 1) {
+                const pt = terminal.point.Point{ .active = .{ .x = @intCast(c), .y = @intCast(row_idx) } };
+                if (pages.getCell(pt)) |cell| {
+                    cell.cell.content_tag = .codepoint;
+                    cell.cell.content = .{ .codepoint = ' ' };
+                    cell.cell.style_id = 0;
+                    cell.cell.wide = .narrow;
+                    cell.row.dirty = true;
+                }
+            }
+        }
+    }
+
+    const writeStr = struct {
+        fn text(p: anytype, s: []const u8, row: usize, col: usize) void {
+            for (s, 0..) |ch, i| {
+                const pt = terminal.point.Point{ .active = .{ .x = @intCast(col + i), .y = @intCast(row) } };
+                if (p.getCell(pt)) |cell| {
+                    cell.cell.content_tag = .codepoint;
+                    cell.cell.content = .{ .codepoint = ch };
+                    cell.cell.style_id = 0;
+                    cell.cell.wide = .narrow;
+                    cell.row.dirty = true;
+                }
+            }
+        }
+    }.text;
+
+    const writeColorHex = struct {
+        fn hex(p: anytype, color: [3]u8, row: usize, col: usize) void {
+            var buf: [8]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "#{x:0>2}{x:0>2}{x:0>2}", .{ color[0], color[1], color[2] }) catch unreachable;
+            writeStr(p, s, row, col);
+        }
+    }.hex;
+
+    var crow: usize = 0;
+
+    // Header
+    if (start_row + crow < rows) {
+        writeStr(pages, " Theme Creator ", start_row + crow, start_col);
+    }
+    crow += 1;
+
+    // Name field
+    if (start_row + crow < rows) {
+        const focused = creator.focused_field == 0;
+        const prefix = if (focused) ">Name: " else " Name: ";
+        const max_nw = content_width -| prefix.len -| 2;
+        writeStr(pages, prefix, start_row + crow, start_col);
+
+        writeStr(pages, "[", start_row + crow, start_col + prefix.len);
+        const nb = creator.name.items;
+        const dn = if (nb.len > max_nw) nb[0..max_nw] else nb;
+        writeStr(pages, dn, start_row + crow, start_col + prefix.len + 1);
+        var si: usize = 0;
+        while (si < max_nw - dn.len) : (si += 1) {
+            const pt = terminal.point.Point{ .active = .{ .x = @intCast(start_col + prefix.len + 1 + dn.len + si), .y = @intCast(start_row + crow) } };
+            if (pages.getCell(pt)) |cell| {
+                cell.cell.content_tag = .codepoint;
+                cell.cell.content = .{ .codepoint = ' ' };
+                cell.cell.style_id = 0;
+                cell.cell.wide = .narrow;
+                cell.row.dirty = true;
+            }
+        }
+        writeStr(pages, "]", start_row + crow, start_col + prefix.len + 1 + max_nw);
+    }
+    crow += 1;
+
+    // BG + FG
+    if (start_row + crow < rows) {
+        const bgp = if (creator.focused_field == 1) ">BG: " else " BG: ";
+        writeStr(pages, bgp, start_row + crow, start_col);
+        writeColorHex(pages, creator.background, start_row + crow, start_col + bgp.len);
+
+        const fgp = if (creator.focused_field == 2) "  FG: " else "  FG: ";
+        writeStr(pages, fgp, start_row + crow, start_col + bgp.len + 7);
+        writeColorHex(pages, creator.foreground, start_row + crow, start_col + bgp.len + 7 + fgp.len);
+    }
+    crow += 1;
+
+    // Palette: 4 per row
+    for (0..4) |ri| {
+        if (start_row + crow >= rows) break;
+        var pc: usize = 0;
+        for (0..4) |ci| {
+            const pi = ri * 4 + ci;
+            if (pi >= 16) break;
+            const pfx = if (creator.focused_field == 3 + pi) ">" else " ";
+            var buf: [16]u8 = undefined;
+            const label = std.fmt.bufPrint(&buf, "{s}P{d}:", .{ pfx, @as(u32, @intCast(pi)) }) catch unreachable;
+            writeStr(pages, label, start_row + crow, start_col + pc);
+            pc += label.len;
+            writeColorHex(pages, creator.palette[pi], start_row + crow, start_col + pc);
+            pc += 7;
+            writeStr(pages, " ", start_row + crow, start_col + pc);
+            pc += 1;
+        }
+        crow += 1;
+    }
+
+    // Cursor + Cursor Text
+    if (start_row + crow < rows) {
+        const cp = if (creator.focused_field == 19) ">Cur: " else " Cur: ";
+        writeStr(pages, cp, start_row + crow, start_col);
+        writeColorHex(pages, creator.cursor_color, start_row + crow, start_col + cp.len);
+
+        const ctp = if (creator.focused_field == 20) " CText: " else " CText: ";
+        writeStr(pages, ctp, start_row + crow, start_col + cp.len + 7);
+        writeColorHex(pages, creator.cursor_text, start_row + crow, start_col + cp.len + 7 + ctp.len);
+    }
+    crow += 1;
+
+    // Selection BG + FG
+    if (start_row + crow < rows) {
+        const sbp = if (creator.focused_field == 21) ">SelBG: " else " SelBG: ";
+        writeStr(pages, sbp, start_row + crow, start_col);
+        writeColorHex(pages, creator.selection_bg, start_row + crow, start_col + sbp.len);
+
+        const sfp = if (creator.focused_field == 22) " SelFG: " else " SelFG: ";
+        writeStr(pages, sfp, start_row + crow, start_col + sbp.len + 7);
+        writeColorHex(pages, creator.selection_fg, start_row + crow, start_col + sbp.len + 7 + sfp.len);
+    }
+    crow += 1;
+
+    // Opacity slider
+    if (start_row + crow < rows) {
+        const opp = if (creator.focused_field == 23) ">Opacity: " else " Opacity: ";
+        writeStr(pages, opp, start_row + crow, start_col);
+
+        const bar_w: usize = 10;
+        const filled = @as(usize, @intFromFloat(@round(creator.opacity * @as(f64, @floatFromInt(bar_w)))));
+        var bc: usize = 0;
+        while (bc < bar_w) : (bc += 1) {
+            const ch: u21 = if (bc < filled) '█' else '░';
+            const pt = terminal.point.Point{ .active = .{ .x = @intCast(start_col + opp.len + bc), .y = @intCast(start_row + crow) } };
+            if (pages.getCell(pt)) |cell| {
+                cell.cell.content_tag = .codepoint;
+                cell.cell.content = .{ .codepoint = ch };
+                cell.cell.style_id = 0;
+                cell.cell.wide = .narrow;
+                cell.row.dirty = true;
+            }
+        }
+
+        var pb: [8]u8 = undefined;
+        const ps = std.fmt.bufPrint(&pb, " {d}%", .{@as(u32, @intFromFloat(creator.opacity * 100))}) catch unreachable;
+        writeStr(pages, ps, start_row + crow, start_col + opp.len + bar_w);
+    }
+    crow += 1;
+
+    // Instructions
+    if (start_row + crow < rows) {
+        writeStr(pages, " [Ctrl+S save | Esc back]", start_row + crow, start_col);
+    }
+}
+
+/// Handle key events specifically in creator mode.
+fn themePickerHandleKeyCreator(self: *Surface, event: input.KeyEvent) !void {
+    const picker = &(self.theme_picker orelse return);
+    const creator = &(picker.creator orelse return);
+
+    switch (event.key) {
+        .escape => {
+            picker.mode = .browse;
+            try self.themePickerRender();
+            return;
+        },
+
+        .arrow_up => {
+            if (creator.focused_field > 0) {
+                creator.focused_field -= 1;
+            }
+            try self.themePickerRender();
+            return;
+        },
+
+        .arrow_down => {
+            if (creator.focused_field < 23) {
+                creator.focused_field += 1;
+            }
+            try self.themePickerRender();
+            return;
+        },
+
+        .arrow_left => {
+            if (creator.focused_field == 23) {
+                creator.opacity = @max(0.15, creator.opacity - 0.05);
+                try self.themePickerPreviewFromCreator();
+                try self.themePickerRender();
+            }
+            return;
+        },
+
+        .arrow_right => {
+            if (creator.focused_field == 23) {
+                creator.opacity = @min(1.0, creator.opacity + 0.05);
+                try self.themePickerPreviewFromCreator();
+                try self.themePickerRender();
+            }
+            return;
+        },
+
+        .key_s => {
+            if (event.mods.ctrl) {
+                try self.themePickerSaveCreator();
+            }
+            return;
+        },
+
+        .enter, .numpad_enter => {
+            if (creator.focused_field >= 2 and creator.focused_field <= 22) {
+                creator.pending_color_picker = creator.focused_field;
+            }
+            return;
+        },
+
+        else => {
+            // If focused on name field, append typed character
+            if (creator.focused_field == 0) {
+                if (event.utf8.len > 0) {
+                    try creator.name.appendSlice(self.alloc, event.utf8);
+                    try self.themePickerRender();
+                }
+            }
+            return;
+        },
+    }
+}
+
+/// Live preview from the current creator state.
+fn themePickerPreviewFromCreator(self: *Surface) !void {
+    const picker = &(self.theme_picker orelse return);
+    const creator = &(picker.creator orelse return);
+    const base = picker.base_config orelse return;
+
+    var config = try base.clone(self.alloc);
+    defer config.deinit();
+
+    config.background = .{ .r = creator.background[0], .g = creator.background[1], .b = creator.background[2] };
+    config.foreground = .{ .r = creator.foreground[0], .g = creator.foreground[1], .b = creator.foreground[2] };
+    config.@"cursor-color" = .{ .color = .{ .r = creator.cursor_color[0], .g = creator.cursor_color[1], .b = creator.cursor_color[2] } };
+    config.@"cursor-text" = .{ .color = .{ .r = creator.cursor_text[0], .g = creator.cursor_text[1], .b = creator.cursor_text[2] } };
+    config.@"selection-background" = .{ .color = .{ .r = creator.selection_bg[0], .g = creator.selection_bg[1], .b = creator.selection_bg[2] } };
+    config.@"selection-foreground" = .{ .color = .{ .r = creator.selection_fg[0], .g = creator.selection_fg[1], .b = creator.selection_fg[2] } };
+
+    for (0..16) |i| {
+        config.palette.value[i] = .{
+            .r = creator.palette[i][0],
+            .g = creator.palette[i][1],
+            .b = creator.palette[i][2],
+        };
+    }
+
+    config.finalize() catch return;
+    config.@"background-opacity" = creator.opacity;
+
+    self.app.updateConfig(self.rt_app, &config) catch |err| {
+        log.warn("failed to preview creator config: {}", .{err});
+    };
+}
+
+/// Save the creator theme to ~/.config/ghostty/themes/<name>.ghostty.
+fn themePickerSaveCreator(self: *Surface) !void {
+    const picker = &(self.theme_picker orelse return);
+    const creator = &(picker.creator orelse return);
+
+    const name = creator.name.items;
+    if (name.len == 0) return;
+
+    const config_dir_path = try configpkg.preferredDefaultFilePath(self.alloc);
+    defer self.alloc.free(config_dir_path);
+    const config_dir = std.fs.path.dirname(config_dir_path) orelse return;
+    const themes_dir = try std.fs.path.join(self.alloc, &.{ config_dir, "themes" });
+    defer self.alloc.free(themes_dir);
+    try std.fs.cwd().makePath(themes_dir);
+
+    const filename = try std.fmt.allocPrint(self.alloc, "{s}.ghostty", .{name});
+    defer self.alloc.free(filename);
+    const filepath = try std.fs.path.join(self.alloc, &.{ themes_dir, filename });
+    defer self.alloc.free(filepath);
+
+    var file = try std.fs.createFileAbsolute(filepath, .{ .truncate = true });
+    defer file.close();
+    var buf: [2048]u8 = undefined;
+    var fw = file.writer(&buf);
+    const w = &fw.interface;
+
+    try w.print("background = #{x:0>2}{x:0>2}{x:0>2}\n", .{ creator.background[0], creator.background[1], creator.background[2] });
+    try w.print("foreground = #{x:0>2}{x:0>2}{x:0>2}\n", .{ creator.foreground[0], creator.foreground[1], creator.foreground[2] });
+    try w.print("cursor-color = #{x:0>2}{x:0>2}{x:0>2}\n", .{ creator.cursor_color[0], creator.cursor_color[1], creator.cursor_color[2] });
+    try w.print("cursor-text = #{x:0>2}{x:0>2}{x:0>2}\n", .{ creator.cursor_text[0], creator.cursor_text[1], creator.cursor_text[2] });
+    try w.print("selection-background = #{x:0>2}{x:0>2}{x:0>2}\n", .{ creator.selection_bg[0], creator.selection_bg[1], creator.selection_bg[2] });
+    try w.print("selection-foreground = #{x:0>2}{x:0>2}{x:0>2}\n", .{ creator.selection_fg[0], creator.selection_fg[1], creator.selection_fg[2] });
+    for (0..16) |i| {
+        try w.print("palette = {d}=#{x:0>2}{x:0>2}{x:0>2}\n", .{ i, creator.palette[i][0], creator.palette[i][1], creator.palette[i][2] });
+    }
+    try w.print("background-opacity = {d:.2}\n", .{creator.opacity});
+
+    if (picker.meta) |*meta| {
+        meta.addCreation(name) catch |err| {
+            log.warn("failed to mark creation: {}", .{err});
+        };
+    }
+
+    log.info("saved creator theme to {s}", .{filepath});
 }
 
 /// Mouse state for the surface.
