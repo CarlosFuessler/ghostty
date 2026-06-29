@@ -617,6 +617,9 @@ extension Ghostty {
             case GHOSTTY_ACTION_COLOR_CHANGE:
                 colorChange(app, target: target, change: action.action.color_change)
 
+            case GHOSTTY_ACTION_OPEN_COLOR_PICKER:
+                openColorPicker(app, target: target, v: action.action.open_color_picker)
+
             case GHOSTTY_ACTION_RING_BELL:
                 ringBell(app, target: target)
 
@@ -2262,6 +2265,38 @@ extension Ghostty {
                 default:
                     assertionFailure()
                 }
+        }
+
+        private static func openColorPicker(
+            _ app: ghostty_app_t,
+            target: ghostty_target_s,
+            v: ghostty_action_open_color_picker_s
+        ) {
+            switch target.tag {
+            case GHOSTTY_TARGET_APP:
+                Ghostty.logger.warning("open color picker does nothing with an app target")
+                return
+
+            case GHOSTTY_TARGET_SURFACE:
+                guard let surface = target.target.surface else { return }
+                guard let surfaceView = self.surfaceView(from: surface) else { return }
+
+                let initialColor = NSColor(
+                    red: CGFloat(v.r) / 255,
+                    green: CGFloat(v.g) / 255,
+                    blue: CGFloat(v.b) / 255,
+                    alpha: 1
+                )
+
+                let colorPanel = NSColorPanel.shared
+                colorPanel.color = initialColor
+                colorPanel.setAction(#selector(SurfaceView.colorPickerChanged(_:)))
+                colorPanel.setTarget(surfaceView)
+                colorPanel.makeKeyAndOrderFront(nil)
+
+            default:
+                assertionFailure()
+            }
         }
 
         // MARK: User Notifications

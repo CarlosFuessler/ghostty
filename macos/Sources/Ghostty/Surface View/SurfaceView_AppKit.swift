@@ -775,6 +775,19 @@ extension Ghostty {
             bell = true
         }
 
+        @objc func colorPickerChanged(_ sender: NSColorPanel) {
+            guard let surface = self.surface else { return }
+
+            let color = sender.color
+            guard let srgbColor = color.usingColorSpace(.sRGB) else { return }
+
+            let r = UInt8(srgbColor.redComponent * 255)
+            let g = UInt8(srgbColor.greenComponent * 255)
+            let b = UInt8(srgbColor.blueComponent * 255)
+
+            ghostty_surface_color_picker_result(surface, r, g, b)
+        }
+
         @objc private func windowDidChangeScreen(notification: SwiftUI.Notification) {
             guard let window = self.window else { return }
             guard let object = notification.object as? NSWindow, window == object else { return }
