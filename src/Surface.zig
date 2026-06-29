@@ -1380,7 +1380,7 @@ fn themePickerHandleKeyCreator(self: *Surface, event: input.KeyEvent) !void {
         },
 
         .arrow_down => {
-            if (creator.focused_field < 23) {
+            if (creator.focused_field < 24) {
                 creator.focused_field += 1;
             }
             try self.themePickerRender();
