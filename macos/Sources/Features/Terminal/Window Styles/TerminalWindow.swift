@@ -251,6 +251,11 @@ class TerminalWindow: NSWindow {
         }
     }
 
+    override func toggleTabBar(_ sender: Any?) {
+        // AppKit's native toggleTabBar conflicts with our custom titlebar tab styling
+        // and causes crashes. We override and disable it.
+    }
+
     override func addTitlebarAccessoryViewController(_ childViewController: NSTitlebarAccessoryViewController) {
         super.addTitlebarAccessoryViewController(childViewController)
 

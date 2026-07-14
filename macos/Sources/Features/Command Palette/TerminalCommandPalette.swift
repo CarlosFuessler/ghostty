@@ -64,7 +64,7 @@ struct TerminalCommandPaletteView: View {
         // Sort the rest. We replace ":" with a character that sorts before space
         // so that "Foo:" sorts before "Foo Bar:". Use sortKey as a tie-breaker
         // for stable ordering when titles are equal.
-        options.append(contentsOf: (jumpOptions + terminalOptions).sorted { a, b in
+        options.append(contentsOf: (jumpOptions + terminalOptions + builtinOptions).sorted { a, b in
             let aNormalized = a.title.replacingOccurrences(of: ":", with: "\t")
             let bNormalized = b.title.replacingOccurrences(of: ":", with: "\t")
             let comparison = aNormalized.localizedCaseInsensitiveCompare(bNormalized)
@@ -77,6 +77,55 @@ struct TerminalCommandPaletteView: View {
             }
             return false
         })
+        return options
+    }
+
+    /// Built-in commands always available in the command palette.
+    private var builtinOptions: [CommandOption] {
+        var options: [CommandOption] = []
+        
+        options.append(CommandOption(
+            title: "Help: Open Documentation",
+            description: "Open the online Ghostty documentation website",
+            leadingIcon: "questionmark.circle"
+        ) {
+            if let url = URL(string: "https://ghostty.org/docs") {
+                NSWorkspace.shared.open(url)
+            }
+        })
+        
+        options.append(CommandOption(
+            title: "Help: Show About Window",
+            description: "Show information about Ghostty",
+            leadingIcon: "info.circle"
+        ) {
+            AboutController.shared.show()
+        })
+        
+        options.append(CommandOption(
+            title: "Settings: Open Settings GUI",
+            description: "Open the native configuration settings manager",
+            leadingIcon: "gearshape"
+        ) {
+            SettingsWindowController.shared.show()
+        })
+
+        options.append(CommandOption(
+            title: "Config: Edit Config File Manually",
+            description: "Open the raw configuration file in your default editor",
+            leadingIcon: "doc.text"
+        ) {
+            (NSApp.delegate as? AppDelegate)?.ghostty.openConfig()
+        })
+
+        options.append(CommandOption(
+            title: "Config: Reload Configuration",
+            description: "Reload configuration settings from disk",
+            leadingIcon: "arrow.clockwise"
+        ) {
+            (NSApp.delegate as? AppDelegate)?.ghostty.reloadConfig()
+        })
+        
         return options
     }
 

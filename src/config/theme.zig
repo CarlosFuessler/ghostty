@@ -26,32 +26,19 @@ pub const Location = enum {
     ) error{OutOfMemory}!?[]const u8 {
         return switch (self) {
             .user => user: {
-                const subdir = std.fs.path.join(arena_alloc, &.{
-                    "ghostty", "themes",
-                }) catch return error.OutOfMemory;
-
-                break :user internal_os.xdg.config(
-                    arena_alloc,
-                    .{ .subdir = subdir },
-                ) catch |err| {
-                    // We need to do some comptime tricks to get the right
-                    // error set since some platforms don't support some
-                    // error types.
-                    const Error = @TypeOf(err) || switch (builtin.os.tag) {
-                        .ios => error{BufferTooSmall},
-                        else => error{},
-                    };
-
-                    switch (@as(Error, err)) {
+                const file_load = @import("file_load.zig");
+                const config_path = file_load.preferredDefaultFilePath(arena_alloc) catch |err| {
+                    switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
-                        error.BufferTooSmall => return error.OutOfMemory,
-
-                        // Any other error we treat as the XDG directory not
-                        // existing. Windows in particularly can return a LOT
-                        // of errors here.
                         else => return null,
                     }
                 };
+                const config_dir = std.fs.path.dirname(config_path) orelse {
+                    return null;
+                };
+                break :user std.fs.path.join(arena_alloc, &.{
+                    config_dir, "themes",
+                }) catch return error.OutOfMemory;
             },
 
             .resources => try std.fs.path.join(arena_alloc, &.{

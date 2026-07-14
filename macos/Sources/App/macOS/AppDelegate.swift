@@ -104,6 +104,9 @@ class AppDelegate: NSObject,
     /// The current state of the quick terminal.
     private var quickTerminalControllerState: QuickTerminalState = .uninitialized
 
+    /// The macOS menu bar status item (taskbar extra)
+    private var statusItem: NSStatusItem?
+
     /// Whether the quick terminal has already been initialized.
     var quickControllerInitialized: Bool {
         if case .initialized = quickTerminalControllerState {
@@ -339,6 +342,24 @@ class AppDelegate: NSObject,
                 NSApp.arrangeInFront(nil)
             }
         }
+
+        // Remove Cmd+, shortcut to prevent zoom conflict and let it be used by keybinds
+        menuOpenConfig?.keyEquivalent = ""
+
+        // Create Taskbar (Status Bar) Item on macOS
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = statusItem?.button {
+            button.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: nil)
+            button.action = #selector(statusBarClicked(_:))
+            button.target = self
+        }
+        
+        let barMenu = NSMenu()
+        barMenu.addItem(NSMenuItem(title: "Settings...", action: #selector(showSettingsMenu(_:)), keyEquivalent: ""))
+        barMenu.addItem(NSMenuItem.separator())
+        barMenu.addItem(NSMenuItem(title: "New Window", action: #selector(newWindow(_:)), keyEquivalent: ""))
+        barMenu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        statusItem?.menu = barMenu
     }
 
     func applicationDidHide(_ notification: Notification) {
@@ -934,7 +955,7 @@ class AppDelegate: NSObject,
     // MARK: - IB Actions
 
     @IBAction func openConfig(_ sender: Any?) {
-        ghostty.openConfig()
+        SettingsWindowController.shared.show()
     }
 
     @IBAction func reloadConfig(_ sender: Any?) {
@@ -1370,6 +1391,13 @@ extension AppDelegate {
             }
             await NSApp.reply(toApplicationShouldTerminate: true)
         }
+    }
+
+    @objc private func statusBarClicked(_ sender: Any?) {
+    }
+    
+    @objc private func showSettingsMenu(_ sender: Any?) {
+        SettingsWindowController.shared.show()
     }
 }
 

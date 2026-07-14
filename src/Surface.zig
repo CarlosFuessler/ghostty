@@ -227,7 +227,7 @@ const ThemePicker = struct {
     alloc: Allocator,
 
     /// The current search query (UTF-8).
-    query: std.ArrayList(u8),
+    query: std.ArrayListUnmanaged(u8),
 
     /// All discovered theme entries.
     themes: []ThemeEntry,
@@ -285,7 +285,7 @@ const ThemePicker = struct {
     const CreatorState = struct {
         const Color = [3]u8;
 
-        name: std.ArrayList(u8),
+        name: std.ArrayListUnmanaged(u8),
         background: Color,
         foreground: Color,
         palette: [16]Color,
@@ -296,7 +296,8 @@ const ThemePicker = struct {
         opacity: f64,
         focused_field: usize,
         pending_color_picker: ?usize,
-        hex_input: ?std.ArrayList(u8) = null,
+        hex_input: ?std.ArrayListUnmanaged(u8) = null,
+        status_msg: ?[]const u8 = null,
     };
 
     fn deinit(self: *ThemePicker) void {
@@ -369,7 +370,7 @@ fn themePickerOpen(self: *Surface) !bool {
     if (grid.rows < 6) return false;
 
     const min_picker_rows: usize = 5; // header, search, separator, opacity, 1 theme
-    const picker_rows: usize = @max(min_picker_rows, @min(@as(usize, @intCast(grid.rows)) - 2, 15));
+    const picker_rows: usize = @max(min_picker_rows, @min(@as(usize, @intCast(grid.rows)) - 2, 18));
     const start_row: usize = (@as(usize, @intCast(grid.rows)) - picker_rows) / 2;
 
     // Copy theme entries out of the arena into our own allocations
@@ -419,7 +420,7 @@ fn themePickerOpen(self: *Surface) !bool {
     for (0..theme_count) |i| filtered.appendAssumeCapacity(i);
 
     // Initialize query
-    var query = std.ArrayList(u8){};
+    var query = std.ArrayListUnmanaged(u8){};
     errdefer query.deinit(self.alloc);
 
     const num_cols: usize = @intCast(grid.columns);
@@ -495,6 +496,9 @@ fn themePickerClose(self: *Surface) void {
 
 /// Restore saved cell data to the terminal screen.
 fn themePickerRestoreCells(self: *Surface, picker: *ThemePicker) void {
+    self.renderer_state.mutex.lock();
+    defer self.renderer_state.mutex.unlock();
+
     const grid = self.size.grid();
     const screen = &self.io.terminal;
     const num_cols: usize = @intCast(grid.columns);
@@ -522,8 +526,56 @@ fn themePickerRestoreCells(self: *Surface, picker: *ThemePicker) void {
     }
 }
 
+fn drawThemePickerBox(pages: anytype, start_row: usize, start_col: usize, width: usize, height: usize, cols: usize, rows: usize) void {
+    var r: usize = 0;
+    while (r < height) : (r += 1) {
+        const row_idx = start_row + r;
+        if (row_idx >= rows) break;
+        var c: usize = 0;
+        while (c < width) : (c += 1) {
+            const col_idx = start_col + c;
+            if (col_idx >= cols) break;
+
+            const pt = terminal.point.Point{ .active = .{ .x = @intCast(col_idx), .y = @intCast(row_idx) } };
+            if (pages.getCell(pt)) |cell| {
+                cell.cell.content_tag = .codepoint;
+                cell.cell.wide = .narrow;
+                cell.cell.style_id = 0;
+                cell.row.dirty = true;
+
+                if (r == 0) {
+                    if (c == 0) {
+                        cell.cell.content = .{ .codepoint = '┌' };
+                    } else if (c == width - 1) {
+                        cell.cell.content = .{ .codepoint = '┐' };
+                    } else {
+                        cell.cell.content = .{ .codepoint = '─' };
+                    }
+                } else if (r == height - 1) {
+                    if (c == 0) {
+                        cell.cell.content = .{ .codepoint = '└' };
+                    } else if (c == width - 1) {
+                        cell.cell.content = .{ .codepoint = '┘' };
+                    } else {
+                        cell.cell.content = .{ .codepoint = '─' };
+                    }
+                } else {
+                    if (c == 0 or c == width - 1) {
+                        cell.cell.content = .{ .codepoint = '│' };
+                    } else {
+                        cell.cell.content = .{ .codepoint = ' ' };
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Render the theme picker in the terminal.
 fn themePickerRender(self: *Surface) !void {
+    self.renderer_state.mutex.lock();
+    defer self.renderer_state.mutex.unlock();
+
     const picker = self.theme_picker orelse return;
 
     if (picker.mode == .creator) {
@@ -536,38 +588,21 @@ fn themePickerRender(self: *Surface) !void {
     const rows: usize = @intCast(grid.rows);
     const start_row: usize = picker.start_row;
     const list_rows = picker.height -| 4;
-    const content_width = @min(cols, @as(usize, 60));
+    const content_width = @min(cols, @as(usize, 70));
     const start_col = (cols -| content_width) / 2;
-    const opacity_row = start_row + picker.height - 1;
+    const opacity_row = start_row + picker.height - 2;
 
     const pages = &self.io.terminal.screens.active.pages;
 
-    // Clear all picker rows first (write spaces)
-    {
-        var r: usize = 0;
-        while (r < picker.height) : (r += 1) {
-            const row_idx = start_row + r;
-            if (row_idx >= rows) break;
-            var c: usize = 0;
-            while (c < cols) : (c += 1) {
-                const pt = terminal.point.Point{ .active = .{ .x = @intCast(c), .y = @intCast(row_idx) } };
-                if (pages.getCell(pt)) |cell| {
-                    cell.cell.content_tag = .codepoint;
-                    cell.cell.content = .{ .codepoint = ' ' };
-                    cell.cell.style_id = 0;
-                    cell.cell.wide = .narrow;
-                    cell.row.dirty = true;
-                }
-            }
-        }
-    }
+    // Draw the box and borders
+    drawThemePickerBox(pages, start_row, start_col, content_width, picker.height, cols, rows);
 
-    // Header
+    // Header (on the top border)
     if (start_row < rows) {
-        var hc: usize = 0;
         const header = " Theme Picker ";
+        var hc: usize = 0;
         while (hc < header.len) : (hc += 1) {
-            const col = start_col + hc;
+            const col = start_col + 2 + hc;
             if (col >= cols) break;
             const pt = terminal.point.Point{ .active = .{ .x = @intCast(col), .y = @intCast(start_row) } };
             if (pages.getCell(pt)) |cell| {
@@ -578,11 +613,12 @@ fn themePickerRender(self: *Surface) !void {
                 cell.row.dirty = true;
             }
         }
+
         var buf: [64]u8 = undefined;
-        const count_str = std.fmt.bufPrint(&buf, "({} themes found)", .{picker.themes.len}) catch unreachable;
+        const count_str = std.fmt.bufPrint(&buf, "({} themes found) ", .{picker.themes.len}) catch unreachable;
         var cc: usize = 0;
         while (cc < count_str.len) : (cc += 1) {
-            const col = start_col + 15 + cc;
+            const col = start_col + 17 + cc;
             if (col >= cols) break;
             const pt = terminal.point.Point{ .active = .{ .x = @intCast(col), .y = @intCast(start_row) } };
             if (pages.getCell(pt)) |cell| {
@@ -657,10 +693,10 @@ fn themePickerRender(self: *Surface) !void {
     // Search bar
     const search_row = start_row + 1;
     if (search_row < rows) {
-        const search_label = " Search: ";
+        const search_label = "Search: ";
         var sc: usize = 0;
         while (sc < search_label.len) : (sc += 1) {
-            const col = start_col + sc;
+            const col = start_col + 2 + sc;
             if (col >= cols) break;
             const pt = terminal.point.Point{ .active = .{ .x = @intCast(col), .y = @intCast(search_row) } };
             if (pages.getCell(pt)) |cell| {
@@ -675,7 +711,7 @@ fn themePickerRender(self: *Surface) !void {
         const placeholder = if (query.len > 0) query else "type to filter...";
         var qc: usize = 0;
         while (qc < placeholder.len) : (qc += 1) {
-            const col = start_col + 9 + qc;
+            const col = start_col + 2 + search_label.len + qc;
             if (col >= cols) break;
             const pt = terminal.point.Point{ .active = .{ .x = @intCast(col), .y = @intCast(search_row) } };
             if (pages.getCell(pt)) |cell| {
@@ -688,21 +724,26 @@ fn themePickerRender(self: *Surface) !void {
         }
     }
 
-    // Separator
+    // Separator (connected to borders)
     const sep_row = start_row + 2;
     if (sep_row < rows) {
-        const sep_count = @min(content_width, @as(usize, 60));
         var i: usize = 0;
-        while (i < sep_count) : (i += 1) {
+        while (i < content_width) : (i += 1) {
             const col = start_col + i;
             if (col >= cols) break;
             const pt = terminal.point.Point{ .active = .{ .x = @intCast(col), .y = @intCast(sep_row) } };
             if (pages.getCell(pt)) |cell| {
                 cell.cell.content_tag = .codepoint;
-                cell.cell.content = .{ .codepoint = '─' };
-                cell.cell.style_id = 0;
                 cell.cell.wide = .narrow;
+                cell.cell.style_id = 0;
                 cell.row.dirty = true;
+                if (i == 0) {
+                    cell.cell.content = .{ .codepoint = '├' };
+                } else if (i == content_width - 1) {
+                    cell.cell.content = .{ .codepoint = '┤' };
+                } else {
+                    cell.cell.content = .{ .codepoint = '─' };
+                }
             }
         }
     }
@@ -722,10 +763,10 @@ fn themePickerRender(self: *Surface) !void {
             const theme = picker.themes[theme_idx];
             const is_selected = list_idx == picker.selected;
 
-            const prefix = if (is_selected) " > " else "   ";
+            const prefix = if (is_selected) "> " else "  ";
             var pc: usize = 0;
             while (pc < prefix.len) : (pc += 1) {
-                const col = start_col + pc;
+                const col = start_col + 2 + pc;
                 if (col >= cols) break;
                 const pt = terminal.point.Point{ .active = .{ .x = @intCast(col), .y = @intCast(row) } };
                 if (pages.getCell(pt)) |cell| {
@@ -744,7 +785,7 @@ fn themePickerRender(self: *Surface) !void {
                 break :blk ' ';
             } else ' ';
             {
-                const col = start_col + 3;
+                const col = start_col + 4;
                 if (col < cols) {
                     const pt = terminal.point.Point{ .active = .{ .x = @intCast(col), .y = @intCast(row) } };
                     if (pages.getCell(pt)) |cell| {
@@ -757,11 +798,11 @@ fn themePickerRender(self: *Surface) !void {
                 }
             }
 
-            const max_name = content_width -| 5;
+            const max_name = content_width -| 8;
             const name_slice = if (theme.name.len > max_name) theme.name[0..max_name] else theme.name;
             var nc: usize = 0;
             while (nc < name_slice.len) : (nc += 1) {
-                const col = start_col + 4 + nc;
+                const col = start_col + 5 + nc;
                 if (col >= cols) break;
                 const pt = terminal.point.Point{ .active = .{ .x = @intCast(col), .y = @intCast(row) } };
                 if (pages.getCell(pt)) |cell| {
@@ -780,7 +821,7 @@ fn themePickerRender(self: *Surface) !void {
         const label = "Opacity: ";
         var lc: usize = 0;
         while (lc < label.len) : (lc += 1) {
-            const col = start_col + lc;
+            const col = start_col + 2 + lc;
             if (col >= cols) break;
             const pt = terminal.point.Point{ .active = .{ .x = @intCast(col), .y = @intCast(opacity_row) } };
             if (pages.getCell(pt)) |cell| {
@@ -792,11 +833,11 @@ fn themePickerRender(self: *Surface) !void {
             }
         }
 
-        const bar_width = @as(usize, 10);
+        const bar_width = @as(usize, 20);
         const filled = @as(usize, @intFromFloat(@round(picker.opacity * @as(f64, @floatFromInt(bar_width)))));
         var bc: usize = 0;
         while (bc < bar_width) : (bc += 1) {
-            const col = start_col + label.len + bc;
+            const col = start_col + 2 + label.len + bc;
             if (col >= cols) break;
             const ch: u21 = if (bc < filled) '█' else '░';
             const pt = terminal.point.Point{ .active = .{ .x = @intCast(col), .y = @intCast(opacity_row) } };
@@ -813,12 +854,27 @@ fn themePickerRender(self: *Surface) !void {
         const pct_str = std.fmt.bufPrint(&pct_buf, " {d}%", .{@as(u32, @intFromFloat(picker.opacity * 100))}) catch unreachable;
         var pc: usize = 0;
         while (pc < pct_str.len) : (pc += 1) {
-            const col = start_col + label.len + bar_width + pc;
+            const col = start_col + 2 + label.len + bar_width + pc;
             if (col >= cols) break;
             const pt = terminal.point.Point{ .active = .{ .x = @intCast(col), .y = @intCast(opacity_row) } };
             if (pages.getCell(pt)) |cell| {
                 cell.cell.content_tag = .codepoint;
                 cell.cell.content = .{ .codepoint = pct_str[pc] };
+                cell.cell.style_id = 0;
+                cell.cell.wide = .narrow;
+                cell.row.dirty = true;
+            }
+        }
+
+        const inst_str = " [Ctrl+N create]";
+        var ic: usize = 0;
+        while (ic < inst_str.len) : (ic += 1) {
+            const col = start_col + 35 + ic;
+            if (col >= cols) break;
+            const pt = terminal.point.Point{ .active = .{ .x = @intCast(col), .y = @intCast(opacity_row) } };
+            if (pages.getCell(pt)) |cell| {
+                cell.cell.content_tag = .codepoint;
+                cell.cell.content = .{ .codepoint = inst_str[ic] };
                 cell.cell.style_id = 0;
                 cell.cell.wide = .narrow;
                 cell.row.dirty = true;
@@ -929,64 +985,89 @@ fn themePickerHandleKey(self: *Surface, event: input.KeyEvent) !void {
         },
 
         .key_l => {
+            if (event.mods.ctrl) {
+                if (picker.filtered.items.len > 0) {
+                    if (picker.meta) |*meta| {
+                        const idx = picker.filtered.items[picker.selected];
+                        _ = meta.toggleFavorite(picker.themes[idx].name) catch |err| {
+                            log.warn("failed to toggle favorite: {}", .{err});
+                        };
+                        try self.themePickerFilter();
+                    }
+                }
+            } else {
+                if (event.utf8.len > 0) {
+                    try picker.query.appendSlice(self.alloc, event.utf8);
+                    try self.themePickerFilter();
+                }
+            }
+        },
+
+        .space => {
             if (picker.filtered.items.len > 0) {
                 if (picker.meta) |*meta| {
                     const idx = picker.filtered.items[picker.selected];
                     _ = meta.toggleFavorite(picker.themes[idx].name) catch |err| {
                         log.warn("failed to toggle favorite: {}", .{err});
                     };
+                    try self.themePickerFilter();
                 }
             }
         },
 
-        .key_h => {
-            if (picker.mode != .browse) return;
-            const tag = @intFromEnum(picker.sort_tab);
-            picker.sort_tab = if (tag > 0)
-                @enumFromInt(tag - 1)
-            else
-                @enumFromInt(@typeInfo(@TypeOf(picker.sort_tab)).@"enum".fields.len - 1);
-            try self.themePickerFilter();
-            picker.selected = 0;
-            picker.scroll_offset = 0;
-        },
-
         .tab => {
-            picker.mode = if (picker.mode == .browse) .creator else .browse;
-            if (picker.mode == .creator and picker.creator == null) {
-                try self.themePickerInitCreator();
-            }
-            try self.themePickerRender();
-            return;
-        },
-
-        .arrow_left => {
-            if (picker.mode == .browse) {
-                const tag = @intFromEnum(picker.sort_tab);
+            const tag = @intFromEnum(picker.sort_tab);
+            if (event.mods.shift) {
                 picker.sort_tab = if (tag > 0)
                     @enumFromInt(tag - 1)
                 else
                     @enumFromInt(@typeInfo(@TypeOf(picker.sort_tab)).@"enum".fields.len - 1);
-                try self.themePickerFilter();
-                picker.selected = 0;
-                picker.scroll_offset = 0;
             } else {
-                picker.opacity = @max(0.15, picker.opacity - 0.05);
-            }
-        },
-
-        .arrow_right => {
-            if (picker.mode == .browse) {
-                const tag = @intFromEnum(picker.sort_tab);
                 picker.sort_tab = if (tag < @typeInfo(@TypeOf(picker.sort_tab)).@"enum".fields.len - 1)
                     @enumFromInt(tag + 1)
                 else
                     @enumFromInt(0);
-                try self.themePickerFilter();
-                picker.selected = 0;
-                picker.scroll_offset = 0;
+            }
+            try self.themePickerFilter();
+            picker.selected = 0;
+            picker.scroll_offset = 0;
+
+            // Apply preview for the new selection
+            if (picker.filtered.items.len > 0) {
+                const idx = picker.filtered.items[picker.selected];
+                self.themePickerPreview(picker.themes[idx]);
             } else {
-                picker.opacity = @min(1.0, picker.opacity + 0.05);
+                self.themePickerRestore();
+            }
+        },
+
+        .key_n => {
+            if (event.mods.ctrl) {
+                if (picker.creator == null) {
+                    self.themePickerInitCreator() catch |err| {
+                        log.warn("failed to initialize creator: {}", .{err});
+                        return;
+                    };
+                }
+                picker.mode = .creator;
+                try self.themePickerRender();
+                return;
+            }
+        },
+
+        .arrow_left => {
+            picker.opacity = @max(0.15, picker.opacity - 0.05);
+            if (picker.filtered.items.len > 0) {
+                const idx = picker.filtered.items[picker.selected];
+                self.themePickerPreview(picker.themes[idx]);
+            }
+        },
+
+        .arrow_right => {
+            picker.opacity = @min(1.0, picker.opacity + 0.05);
+            if (picker.filtered.items.len > 0) {
+                const idx = picker.filtered.items[picker.selected];
+                self.themePickerPreview(picker.themes[idx]);
             }
         },
 
@@ -1110,9 +1191,70 @@ fn themePickerRestore(self: *Surface) void {
     };
 }
 
+/// Save the selected theme name persistently to the user's config file.
+fn themePickerSaveThemeToUserConfig(self: *Surface, name: []const u8) !void {
+    const config_path = try configpkg.preferredDefaultFilePath(self.alloc);
+    defer self.alloc.free(config_path);
+
+    // Make sure the parent directory exists
+    if (std.fs.path.dirname(config_path)) |dir_path| {
+        std.fs.cwd().makePath(dir_path) catch {};
+    }
+
+    // Try to open the file. If it doesn't exist, create it.
+    var file = std.fs.openFileAbsolute(config_path, .{ .mode = .read_write }) catch |err| switch (err) {
+        error.FileNotFound => try std.fs.createFileAbsolute(config_path, .{}),
+        else => return err,
+    };
+    defer file.close();
+
+    const file_size = (try file.stat()).size;
+
+    // Allocate buffer for reading file contents (cap to 1MB to be safe)
+    if (file_size > 1024 * 1024) {
+        log.warn("config file too large to modify safely", .{});
+        return error.StreamTooLong;
+    }
+    const content = try self.alloc.alloc(u8, file_size);
+    defer self.alloc.free(content);
+
+    const read_bytes = try file.readAll(content);
+
+    // Parse line by line to search for and replace/append the `theme` option
+    var lines_list = std.ArrayList(u8){};
+    defer lines_list.deinit(self.alloc);
+
+    var line_it = std.mem.splitScalar(u8, content[0..read_bytes], '\n');
+    var found_theme_line = false;
+    const w = lines_list.writer(self.alloc);
+    while (line_it.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (std.mem.startsWith(u8, trimmed, "theme") and (trimmed.len > 5 and (trimmed[5] == ' ' or trimmed[5] == '='))) {
+            try w.print("theme = \"{s}\"\n", .{name});
+            found_theme_line = true;
+        } else {
+            // Write original line
+            try w.print("{s}\n", .{line});
+        }
+    }
+
+    // If there was no theme option, append it
+    if (!found_theme_line) {
+        try w.print("theme = \"{s}\"\n", .{name});
+    }
+
+    // Write modified content back to the file
+    try file.seekTo(0);
+    try file.setEndPos(0);
+    try file.writeAll(lines_list.items);
+}
+
 /// Apply a theme and close the picker.
 fn themePickerApply(self: *Surface, theme: ThemePicker.ThemeEntry) void {
     log.info("applying theme: {s}", .{theme.name});
+    self.themePickerSaveThemeToUserConfig(theme.name) catch |err| {
+        log.warn("failed to save theme to user config: {}", .{err});
+    };
     self.themePickerPreview(theme);
     self.themePickerClose();
 }
@@ -1126,32 +1268,36 @@ fn themePickerInitCreator(self: *Surface) !void {
 
     var config = try picker.base_config.?.clone(self.alloc);
     defer config.deinit();
-    try config.loadFile(self.alloc, theme.path);
-    try config.finalize();
+    config.loadFile(self.alloc, theme.path) catch |err| {
+        log.warn("failed to load theme {s}: {}", .{ theme.path, err });
+    };
+    config.finalize() catch |err| {
+        log.warn("failed to finalize config: {}", .{err});
+    };
 
     const Color = ThemePicker.CreatorState.Color;
     const bg: Color = .{ config.background.r, config.background.g, config.background.b };
     const fg: Color = .{ config.foreground.r, config.foreground.g, config.foreground.b };
 
-    const cursor_color: Color = if (config.@"cursor-color") |c|
-        if (c == .color) .{ c.color.r, c.color.g, c.color.b } else fg
-    else
-        fg;
+    const cursor_color: Color = if (config.@"cursor-color") |c| switch (c) {
+        .color => |col| .{ col.r, col.g, col.b },
+        else => fg,
+    } else fg;
 
-    const cursor_text: Color = if (config.@"cursor-text") |c|
-        if (c == .color) .{ c.color.r, c.color.g, c.color.b } else bg
-    else
-        bg;
+    const cursor_text: Color = if (config.@"cursor-text") |c| switch (c) {
+        .color => |col| .{ col.r, col.g, col.b },
+        else => bg,
+    } else bg;
 
-    const sel_bg: Color = if (config.@"selection-background") |c|
-        if (c == .color) .{ c.color.r, c.color.g, c.color.b } else bg
-    else
-        fg;
+    const sel_bg: Color = if (config.@"selection-background") |c| switch (c) {
+        .color => |col| .{ col.r, col.g, col.b },
+        else => bg,
+    } else bg;
 
-    const sel_fg: Color = if (config.@"selection-foreground") |c|
-        if (c == .color) .{ c.color.r, c.color.g, c.color.b } else fg
-    else
-        bg;
+    const sel_fg: Color = if (config.@"selection-foreground") |c| switch (c) {
+        .color => |col| .{ col.r, col.g, col.b },
+        else => fg,
+    } else fg;
 
     var palette: [16]Color = undefined;
     for (0..16) |i| {
@@ -1164,7 +1310,7 @@ fn themePickerInitCreator(self: *Surface) !void {
     else
         theme.name;
 
-    var name_list = std.ArrayList(u8){};
+    var name_list = std.ArrayListUnmanaged(u8){};
     try name_list.appendSlice(self.alloc, name_noext);
 
     picker.creator = ThemePicker.CreatorState{
@@ -1190,29 +1336,13 @@ fn themePickerRenderCreator(self: *Surface) !void {
     const cols: usize = @intCast(grid.columns);
     const rows: usize = @intCast(grid.rows);
     const start_row: usize = picker.start_row;
-    const content_width = @min(cols, @as(usize, 60));
+    const content_width = @min(cols, @as(usize, 70));
     const start_col = (cols -| content_width) / 2;
+    const draw_col = start_col + 2;
     const pages = &self.io.terminal.screens.active.pages;
 
-    // Clear all picker rows
-    {
-        var r: usize = 0;
-        while (r < picker.height) : (r += 1) {
-            const row_idx = start_row + r;
-            if (row_idx >= rows) break;
-            var c: usize = 0;
-            while (c < cols) : (c += 1) {
-                const pt = terminal.point.Point{ .active = .{ .x = @intCast(c), .y = @intCast(row_idx) } };
-                if (pages.getCell(pt)) |cell| {
-                    cell.cell.content_tag = .codepoint;
-                    cell.cell.content = .{ .codepoint = ' ' };
-                    cell.cell.style_id = 0;
-                    cell.cell.wide = .narrow;
-                    cell.row.dirty = true;
-                }
-            }
-        }
-    }
+    // Draw the box and borders
+    drawThemePickerBox(pages, start_row, start_col, content_width, picker.height, cols, rows);
 
     const writeStr = struct {
         fn text(p: anytype, s: []const u8, row: usize, col: usize) void {
@@ -1229,36 +1359,81 @@ fn themePickerRenderCreator(self: *Surface) !void {
         }
     }.text;
 
-    const writeColorHex = struct {
-        fn hex(p: anytype, color: [3]u8, row: usize, col: usize) void {
+    const writeSwatch = struct {
+        fn swatch(p: anytype, row: usize, col: usize, color_val: [3]u8, is_focused: bool) void {
+            const pfx = if (is_focused) ">[" else " [";
+            writeStr(p, pfx, row, col);
+            for (0..2) |i| {
+                const pt = terminal.point.Point{ .active = .{ .x = @intCast(col + 2 + i), .y = @intCast(row) } };
+                if (p.getCell(pt)) |cell| {
+                    cell.cell.content_tag = .bg_color_rgb;
+                    cell.cell.content = .{
+                        .color_rgb = .{
+                            .r = color_val[0],
+                            .g = color_val[1],
+                            .b = color_val[2],
+                        },
+                    };
+                    cell.cell.style_id = 0;
+                    cell.cell.wide = .narrow;
+                    cell.row.dirty = true;
+                }
+            }
+            writeStr(p, "]", row, col + 4);
+        }
+    }.swatch;
+
+    const writeHexText = struct {
+        fn hex(p: anytype, color_val: [3]u8, row: usize, col: usize, is_focused: bool, hex_input: ?[]const u8) void {
             var buf: [8]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "#{x:0>2}{x:0>2}{x:0>2}", .{ color[0], color[1], color[2] }) catch unreachable;
-            writeStr(p, s, row, col);
+            if (is_focused and hex_input != null) {
+                const hi = hex_input.?;
+                const s = std.fmt.bufPrint(&buf, "#{s:<6}", .{hi}) catch unreachable;
+                writeStr(p, s, row, col);
+            } else {
+                const s = std.fmt.bufPrint(&buf, "#{x:0>2}{x:0>2}{x:0>2}", .{ color_val[0], color_val[1], color_val[2] }) catch unreachable;
+                writeStr(p, s, row, col);
+            }
         }
     }.hex;
 
-    var crow: usize = 0;
+    const writeSeparator = struct {
+        fn separator(p: anytype, row: usize, sc: usize, w: usize) void {
+            for (0..w) |c| {
+                const pt = terminal.point.Point{ .active = .{ .x = @intCast(sc + c), .y = @intCast(row) } };
+                if (p.getCell(pt)) |cell| {
+                    cell.cell.content_tag = .codepoint;
+                    cell.cell.content = .{ .codepoint = if (c == 0) '├' else if (c == w - 1) '┤' else '─' };
+                    cell.cell.style_id = 0;
+                    cell.cell.wide = .narrow;
+                    cell.row.dirty = true;
+                }
+            }
+        }
+    }.separator;
 
-    // Header
-    if (start_row + crow < rows) {
-        writeStr(pages, " Theme Creator ", start_row + crow, start_col);
+    const hex_in = if (creator.hex_input) |h| h.items else null;
+
+    // Header (on the top border)
+    if (start_row < rows) {
+        const header = " Theme Creator ";
+        writeStr(pages, header, start_row, start_col + 2);
     }
-    crow += 1;
 
-    // Name field
-    if (start_row + crow < rows) {
-        const focused = creator.focused_field == 0;
-        const prefix = if (focused) ">Name: " else " Name: ";
-        const max_nw = content_width -| prefix.len -| 2;
-        writeStr(pages, prefix, start_row + crow, start_col);
-
-        writeStr(pages, "[", start_row + crow, start_col + prefix.len);
+    // Row 1: Name & Opacity
+    if (start_row + 1 < rows) {
+        // Name
+        const name_focused = creator.focused_field == 0;
+        const name_pfx = if (name_focused) ">Name: " else " Name: ";
+        writeStr(pages, name_pfx, start_row + 1, draw_col);
+        writeStr(pages, "[", start_row + 1, draw_col + name_pfx.len);
         const nb = creator.name.items;
+        const max_nw: usize = 20;
         const dn = if (nb.len > max_nw) nb[0..max_nw] else nb;
-        writeStr(pages, dn, start_row + crow, start_col + prefix.len + 1);
+        writeStr(pages, dn, start_row + 1, draw_col + name_pfx.len + 1);
         var si: usize = 0;
         while (si < max_nw - dn.len) : (si += 1) {
-            const pt = terminal.point.Point{ .active = .{ .x = @intCast(start_col + prefix.len + 1 + dn.len + si), .y = @intCast(start_row + crow) } };
+            const pt = terminal.point.Point{ .active = .{ .x = @intCast(draw_col + name_pfx.len + 1 + dn.len + si), .y = @intCast(start_row + 1) } };
             if (pages.getCell(pt)) |cell| {
                 cell.cell.content_tag = .codepoint;
                 cell.cell.content = .{ .codepoint = ' ' };
@@ -1267,77 +1442,19 @@ fn themePickerRenderCreator(self: *Surface) !void {
                 cell.row.dirty = true;
             }
         }
-        writeStr(pages, "]", start_row + crow, start_col + prefix.len + 1 + max_nw);
-    }
-    crow += 1;
+        writeStr(pages, "]", start_row + 1, draw_col + name_pfx.len + 1 + max_nw);
 
-    // BG + FG
-    if (start_row + crow < rows) {
-        const bgp = if (creator.focused_field == 1) ">BG: " else " BG: ";
-        writeStr(pages, bgp, start_row + crow, start_col);
-        writeColorHex(pages, creator.background, start_row + crow, start_col + bgp.len);
-
-        const fgp = if (creator.focused_field == 2) "  FG: " else "  FG: ";
-        writeStr(pages, fgp, start_row + crow, start_col + bgp.len + 7);
-        writeColorHex(pages, creator.foreground, start_row + crow, start_col + bgp.len + 7 + fgp.len);
-    }
-    crow += 1;
-
-    // Palette: 4 per row
-    for (0..4) |ri| {
-        if (start_row + crow >= rows) break;
-        var pc: usize = 0;
-        for (0..4) |ci| {
-            const pi = ri * 4 + ci;
-            if (pi >= 16) break;
-            const pfx = if (creator.focused_field == 3 + pi) ">" else " ";
-            var buf: [16]u8 = undefined;
-            const label = std.fmt.bufPrint(&buf, "{s}P{d}:", .{ pfx, @as(u32, @intCast(pi)) }) catch unreachable;
-            writeStr(pages, label, start_row + crow, start_col + pc);
-            pc += label.len;
-            writeColorHex(pages, creator.palette[pi], start_row + crow, start_col + pc);
-            pc += 7;
-            writeStr(pages, " ", start_row + crow, start_col + pc);
-            pc += 1;
-        }
-        crow += 1;
-    }
-
-    // Cursor + Cursor Text
-    if (start_row + crow < rows) {
-        const cp = if (creator.focused_field == 19) ">Cur: " else " Cur: ";
-        writeStr(pages, cp, start_row + crow, start_col);
-        writeColorHex(pages, creator.cursor_color, start_row + crow, start_col + cp.len);
-
-        const ctp = if (creator.focused_field == 20) " CText: " else " CText: ";
-        writeStr(pages, ctp, start_row + crow, start_col + cp.len + 7);
-        writeColorHex(pages, creator.cursor_text, start_row + crow, start_col + cp.len + 7 + ctp.len);
-    }
-    crow += 1;
-
-    // Selection BG + FG
-    if (start_row + crow < rows) {
-        const sbp = if (creator.focused_field == 21) ">SelBG: " else " SelBG: ";
-        writeStr(pages, sbp, start_row + crow, start_col);
-        writeColorHex(pages, creator.selection_bg, start_row + crow, start_col + sbp.len);
-
-        const sfp = if (creator.focused_field == 22) " SelFG: " else " SelFG: ";
-        writeStr(pages, sfp, start_row + crow, start_col + sbp.len + 7);
-        writeColorHex(pages, creator.selection_fg, start_row + crow, start_col + sbp.len + 7 + sfp.len);
-    }
-    crow += 1;
-
-    // Opacity slider
-    if (start_row + crow < rows) {
-        const opp = if (creator.focused_field == 23) ">Opacity: " else " Opacity: ";
-        writeStr(pages, opp, start_row + crow, start_col);
-
-        const bar_w: usize = 10;
+        // Opacity
+        const op_focused = creator.focused_field == 23;
+        const op_pfx = if (op_focused) ">Opacity: " else " Opacity: ";
+        const op_col = draw_col + 30;
+        writeStr(pages, op_pfx, start_row + 1, op_col);
+        const bar_w: usize = 12;
         const filled = @as(usize, @intFromFloat(@round(creator.opacity * @as(f64, @floatFromInt(bar_w)))));
         var bc: usize = 0;
         while (bc < bar_w) : (bc += 1) {
             const ch: u21 = if (bc < filled) '█' else '░';
-            const pt = terminal.point.Point{ .active = .{ .x = @intCast(start_col + opp.len + bc), .y = @intCast(start_row + crow) } };
+            const pt = terminal.point.Point{ .active = .{ .x = @intCast(op_col + op_pfx.len + bc), .y = @intCast(start_row + 1) } };
             if (pages.getCell(pt)) |cell| {
                 cell.cell.content_tag = .codepoint;
                 cell.cell.content = .{ .codepoint = ch };
@@ -1346,17 +1463,289 @@ fn themePickerRenderCreator(self: *Surface) !void {
                 cell.row.dirty = true;
             }
         }
-
-        var pb: [8]u8 = undefined;
-        const ps = std.fmt.bufPrint(&pb, " {d}%", .{@as(u32, @intFromFloat(creator.opacity * 100))}) catch unreachable;
-        writeStr(pages, ps, start_row + crow, start_col + opp.len + bar_w);
+        var pct_buf: [8]u8 = undefined;
+        const pct_str = std.fmt.bufPrint(&pct_buf, " {d}%", .{@as(u32, @intFromFloat(creator.opacity * 100))}) catch unreachable;
+        writeStr(pages, pct_str, start_row + 1, op_col + op_pfx.len + bar_w);
     }
-    crow += 1;
 
-    // Instructions
-    if (start_row + crow < rows) {
-        writeStr(pages, " [Ctrl+S save | Esc back]", start_row + crow, start_col);
+    // Row 2: Separator
+    if (start_row + 2 < rows) {
+        writeSeparator(pages, start_row + 2, start_col, content_width);
     }
+
+    // Row 3: Section Title [ Base Colors ]
+    if (start_row + 3 < rows) {
+        writeStr(pages, "  [ Base Colors ]", start_row + 3, draw_col);
+    }
+
+    // Row 4: BG + FG
+    if (start_row + 4 < rows) {
+        const bg_focused = creator.focused_field == 1;
+        const bg_pfx = "Background: ";
+        const item_col = draw_col + 2;
+        writeStr(pages, bg_pfx, start_row + 4, item_col);
+        writeSwatch(pages, start_row + 4, item_col + bg_pfx.len, creator.background, bg_focused);
+        writeHexText(pages, creator.background, start_row + 4, item_col + bg_pfx.len + 6, bg_focused, if (bg_focused) hex_in else null);
+
+        const fg_focused = creator.focused_field == 2;
+        const fg_pfx = "Foreground: ";
+        const fg_col = draw_col + 34;
+        writeStr(pages, fg_pfx, start_row + 4, fg_col);
+        writeSwatch(pages, start_row + 4, fg_col + fg_pfx.len, creator.foreground, fg_focused);
+        writeHexText(pages, creator.foreground, start_row + 4, fg_col + fg_pfx.len + 6, fg_focused, if (fg_focused) hex_in else null);
+    }
+
+    // Row 5: Separator
+    if (start_row + 5 < rows) {
+        writeSeparator(pages, start_row + 5, start_col, content_width);
+    }
+
+    // Row 6: Section Title [ Terminal Palette ]
+    if (start_row + 6 < rows) {
+        writeStr(pages, "  [ Terminal Palette ]", start_row + 6, draw_col);
+    }
+
+    // Rows 7..10: Palette (4 per row, simplified visual swatches)
+    for (0..4) |ri| {
+        const crow = start_row + 7 + ri;
+        if (crow >= rows) break;
+        for (0..4) |ci| {
+            const pi = ri * 4 + ci;
+            const is_focused = creator.focused_field == 3 + pi;
+            var buf: [8]u8 = undefined;
+            const label = std.fmt.bufPrint(&buf, "P{d:<2}:", .{@as(u32, @intCast(pi))}) catch unreachable;
+            const item_col = draw_col + ci * 16 + 2;
+            writeStr(pages, label, crow, item_col);
+            writeSwatch(pages, crow, item_col + label.len, creator.palette[pi], is_focused);
+        }
+    }
+
+    // Row 11: Separator
+    if (start_row + 11 < rows) {
+        writeSeparator(pages, start_row + 11, start_col, content_width);
+    }
+
+    // Row 12: Section Title [ Special Colors ]
+    if (start_row + 12 < rows) {
+        writeStr(pages, "  [ Special Colors ]", start_row + 12, draw_col);
+    }
+
+    // Row 13: Cursor + Cursor Text
+    if (start_row + 13 < rows) {
+        const cur_focused = creator.focused_field == 19;
+        const cur_pfx = "Cursor:     ";
+        const item_col = draw_col + 2;
+        writeStr(pages, cur_pfx, start_row + 13, item_col);
+        writeSwatch(pages, start_row + 13, item_col + cur_pfx.len, creator.cursor_color, cur_focused);
+        writeHexText(pages, creator.cursor_color, start_row + 13, item_col + cur_pfx.len + 6, cur_focused, if (cur_focused) hex_in else null);
+
+        const cur_txt_focused = creator.focused_field == 20;
+        const cur_txt_pfx = "Cursor Text: ";
+        const cur_txt_col = draw_col + 34;
+        writeStr(pages, cur_txt_pfx, start_row + 13, cur_txt_col);
+        writeSwatch(pages, start_row + 13, cur_txt_col + cur_txt_pfx.len, creator.cursor_text, cur_txt_focused);
+        writeHexText(pages, creator.cursor_text, start_row + 13, cur_txt_col + cur_txt_pfx.len + 6, cur_txt_focused, if (cur_txt_focused) hex_in else null);
+    }
+
+    // Row 14: Selection BG + FG
+    if (start_row + 14 < rows) {
+        const sel_focused = creator.focused_field == 21;
+        const sel_pfx = "Selection:  ";
+        const item_col = draw_col + 2;
+        writeStr(pages, sel_pfx, start_row + 14, item_col);
+        writeSwatch(pages, start_row + 14, item_col + sel_pfx.len, creator.selection_bg, sel_focused);
+        writeHexText(pages, creator.selection_bg, start_row + 14, item_col + sel_pfx.len + 6, sel_focused, if (sel_focused) hex_in else null);
+
+        const sel_txt_focused = creator.focused_field == 22;
+        const sel_txt_pfx = "Select Text: ";
+        const sel_txt_col = draw_col + 34;
+        writeStr(pages, sel_txt_pfx, start_row + 14, sel_txt_col);
+        writeSwatch(pages, start_row + 14, sel_txt_col + sel_txt_pfx.len, creator.selection_fg, sel_txt_focused);
+        writeHexText(pages, creator.selection_fg, start_row + 14, sel_txt_col + sel_txt_pfx.len + 6, sel_txt_focused, if (sel_txt_focused) hex_in else null);
+    }
+
+    // Row 15: Separator
+    if (start_row + 15 < rows) {
+        writeSeparator(pages, start_row + 15, start_col, content_width);
+    }
+
+    // Row 16: Status message
+    if (start_row + 16 < rows) {
+        if (creator.status_msg) |msg| {
+            const msg_col = start_col + (content_width -| msg.len) / 2;
+            writeStr(pages, msg, start_row + 16, msg_col);
+        }
+    }
+
+    // Row 18: Instructions (at the bottom of the picker, above the bottom border)
+    const inst_row = start_row + picker.height - 2;
+    if (inst_row < rows) {
+        const inst = "[Click color box to edit | Ctrl+S Save | Esc Back]";
+        const inst_col = start_col + (content_width -| inst.len) / 2;
+        writeStr(pages, inst, inst_row, inst_col);
+    }
+}
+
+fn getNeighborField(field: usize, dir: enum { up, down, left, right }) usize {
+    return switch (field) {
+        // Row 1: Name (0), Opacity (23)
+        0 => switch (dir) {
+            .right => 23,
+            .down => 1,
+            else => 0,
+        },
+        23 => switch (dir) {
+            .left => 0,
+            .down => 2,
+            else => 23,
+        },
+
+        // Row 4: BG (1), FG (2)
+        1 => switch (dir) {
+            .up => 0,
+            .right => 2,
+            .down => 3, // P0
+            else => 1,
+        },
+        2 => switch (dir) {
+            .up => 23,
+            .left => 1,
+            .down => 5, // P2
+            else => 2,
+        },
+
+        // Row 7: P0..P3 (3..6)
+        3 => switch (dir) {
+            .up => 1,
+            .right => 4,
+            .down => 7,
+            else => 3,
+        },
+        4 => switch (dir) {
+            .up => 1,
+            .left => 3,
+            .right => 5,
+            .down => 8,
+        },
+        5 => switch (dir) {
+            .up => 2,
+            .left => 4,
+            .right => 6,
+            .down => 9,
+        },
+        6 => switch (dir) {
+            .up => 2,
+            .left => 5,
+            .down => 10,
+            else => 6,
+        },
+
+        // Row 8: P4..P7 (7..10)
+        7 => switch (dir) {
+            .up => 3,
+            .right => 8,
+            .down => 11,
+            else => 7,
+        },
+        8 => switch (dir) {
+            .up => 4,
+            .left => 7,
+            .right => 9,
+            .down => 12,
+        },
+        9 => switch (dir) {
+            .up => 5,
+            .left => 8,
+            .right => 10,
+            .down => 13,
+        },
+        10 => switch (dir) {
+            .up => 6,
+            .left => 9,
+            .down => 14,
+            else => 10,
+        },
+
+        // Row 9: P8..P11 (11..14)
+        11 => switch (dir) {
+            .up => 7,
+            .right => 12,
+            .down => 15,
+            else => 11,
+        },
+        12 => switch (dir) {
+            .up => 8,
+            .left => 11,
+            .right => 13,
+            .down => 16,
+        },
+        13 => switch (dir) {
+            .up => 9,
+            .left => 12,
+            .right => 14,
+            .down => 17,
+        },
+        14 => switch (dir) {
+            .up => 10,
+            .left => 13,
+            .down => 18,
+            else => 14,
+        },
+
+        // Row 10: P12..P15 (15..18)
+        15 => switch (dir) {
+            .up => 11,
+            .right => 16,
+            .down => 19,
+            else => 15,
+        },
+        16 => switch (dir) {
+            .up => 12,
+            .left => 15,
+            .right => 17,
+            .down => 19,
+        },
+        17 => switch (dir) {
+            .up => 13,
+            .left => 16,
+            .right => 18,
+            .down => 20,
+        },
+        18 => switch (dir) {
+            .up => 14,
+            .left => 17,
+            .down => 20,
+            else => 18,
+        },
+
+        // Row 13: Cursor (19), Cursor Text (20)
+        19 => switch (dir) {
+            .up => 15,
+            .right => 20,
+            .down => 21,
+            else => 19,
+        },
+        20 => switch (dir) {
+            .up => 17,
+            .left => 19,
+            .down => 22,
+            else => 20,
+        },
+
+        // Row 14: Selection BG (21), Selection FG (22)
+        21 => switch (dir) {
+            .up => 19,
+            .right => 22,
+            else => 21,
+        },
+        22 => switch (dir) {
+            .up => 20,
+            .left => 21,
+            else => 22,
+        },
+
+        else => field,
+    };
 }
 
 /// Handle key events specifically in creator mode.
@@ -1364,24 +1753,60 @@ fn themePickerHandleKeyCreator(self: *Surface, event: input.KeyEvent) !void {
     const picker = &(self.theme_picker orelse return);
     const creator = &(picker.creator orelse return);
 
+    creator.status_msg = null;
+
     switch (event.key) {
         .escape => {
+            if (creator.hex_input) |*h| {
+                h.deinit(self.alloc);
+                creator.hex_input = null;
+            }
             picker.mode = .browse;
-            try self.themePickerRender();
-            return;
-        },
-
-        .arrow_up => {
-            if (creator.focused_field > 0) {
-                creator.focused_field -= 1;
+            if (picker.filtered.items.len > 0) {
+                const idx = picker.filtered.items[picker.selected];
+                self.themePickerPreview(picker.themes[idx]);
+            } else {
+                self.themePickerRestore();
             }
             try self.themePickerRender();
             return;
         },
 
+        .arrow_up => {
+            if (creator.hex_input) |*h| {
+                h.deinit(self.alloc);
+                creator.hex_input = null;
+            }
+            creator.focused_field = getNeighborField(creator.focused_field, .up);
+            try self.themePickerRender();
+            return;
+        },
+
         .arrow_down => {
-            if (creator.focused_field < 24) {
-                creator.focused_field += 1;
+            if (creator.hex_input) |*h| {
+                h.deinit(self.alloc);
+                creator.hex_input = null;
+            }
+            creator.focused_field = getNeighborField(creator.focused_field, .down);
+            try self.themePickerRender();
+            return;
+        },
+
+        .tab => {
+            if (creator.hex_input) |*h| {
+                h.deinit(self.alloc);
+                creator.hex_input = null;
+            }
+            if (event.mods.shift) {
+                creator.focused_field = if (creator.focused_field > 0)
+                    creator.focused_field - 1
+                else
+                    23;
+            } else {
+                creator.focused_field = if (creator.focused_field < 23)
+                    creator.focused_field + 1
+                else
+                    0;
             }
             try self.themePickerRender();
             return;
@@ -1390,7 +1815,14 @@ fn themePickerHandleKeyCreator(self: *Surface, event: input.KeyEvent) !void {
         .arrow_left => {
             if (creator.focused_field == 23) {
                 creator.opacity = @max(0.15, creator.opacity - 0.05);
-                try self.themePickerPreviewFromCreator();
+                self.themePickerPreviewFromCreator();
+                try self.themePickerRender();
+            } else {
+                if (creator.hex_input) |*h| {
+                    h.deinit(self.alloc);
+                    creator.hex_input = null;
+                }
+                creator.focused_field = getNeighborField(creator.focused_field, .left);
                 try self.themePickerRender();
             }
             return;
@@ -1399,7 +1831,14 @@ fn themePickerHandleKeyCreator(self: *Surface, event: input.KeyEvent) !void {
         .arrow_right => {
             if (creator.focused_field == 23) {
                 creator.opacity = @min(1.0, creator.opacity + 0.05);
-                try self.themePickerPreviewFromCreator();
+                self.themePickerPreviewFromCreator();
+                try self.themePickerRender();
+            } else {
+                if (creator.hex_input) |*h| {
+                    h.deinit(self.alloc);
+                    creator.hex_input = null;
+                }
+                creator.focused_field = getNeighborField(creator.focused_field, .right);
                 try self.themePickerRender();
             }
             return;
@@ -1407,24 +1846,83 @@ fn themePickerHandleKeyCreator(self: *Surface, event: input.KeyEvent) !void {
 
         .key_s => {
             if (event.mods.ctrl) {
-                try self.themePickerSaveCreator();
+                self.themePickerSaveCreator();
             }
             return;
         },
 
         .enter, .numpad_enter => {
-            if (creator.focused_field >= 2 and creator.focused_field <= 22) {
-                creator.pending_color_picker = creator.focused_field;
+            if (creator.hex_input) |*h| {
+                h.deinit(self.alloc);
+                creator.hex_input = null;
+            }
+            try self.themePickerOpenColorPickerForField(creator.focused_field);
+            return;
+        },
+
+        .backspace => {
+            if (creator.focused_field == 0) {
+                if (creator.name.items.len > 0) {
+                    _ = creator.name.pop();
+                    try self.themePickerRender();
+                }
+            } else if (creator.focused_field >= 1 and creator.focused_field <= 22) {
+                if (creator.hex_input) |*h| {
+                    if (h.items.len > 0) {
+                        _ = h.pop();
+                        if (h.items.len == 0) {
+                            h.deinit(self.alloc);
+                            creator.hex_input = null;
+                        }
+                        try self.themePickerRender();
+                    }
+                }
             }
             return;
         },
 
         else => {
-            // If focused on name field, append typed character
             if (creator.focused_field == 0) {
                 if (event.utf8.len > 0) {
                     try creator.name.appendSlice(self.alloc, event.utf8);
                     try self.themePickerRender();
+                }
+            } else if (creator.focused_field >= 1 and creator.focused_field <= 22) {
+                if (event.utf8.len == 1) {
+                    const ch = event.utf8[0];
+                    if (std.ascii.isHex(ch)) {
+                        if (creator.hex_input == null) {
+                            creator.hex_input = std.ArrayListUnmanaged(u8){};
+                        }
+                        if (creator.hex_input.?.items.len < 6) {
+                            try creator.hex_input.?.append(self.alloc, std.ascii.toLower(ch));
+                            if (creator.hex_input.?.items.len == 6) {
+                                const hex_str = creator.hex_input.?.items;
+                                const r = std.fmt.parseInt(u8, hex_str[0..2], 16) catch 0;
+                                const g = std.fmt.parseInt(u8, hex_str[2..4], 16) catch 0;
+                                const b = std.fmt.parseInt(u8, hex_str[4..6], 16) catch 0;
+                                const new_color = [3]u8{ r, g, b };
+
+                                switch (creator.focused_field) {
+                                    1 => creator.background = new_color,
+                                    2 => creator.foreground = new_color,
+                                    3...18 => creator.palette[creator.focused_field - 3] = new_color,
+                                    19 => creator.cursor_color = new_color,
+                                    20 => creator.cursor_text = new_color,
+                                    21 => creator.selection_bg = new_color,
+                                    22 => creator.selection_fg = new_color,
+                                    else => unreachable,
+                                }
+
+                                creator.hex_input.?.deinit(self.alloc);
+                                creator.hex_input = null;
+
+                                self.themePickerPreviewFromCreator();
+                            }
+                            try self.themePickerRender();
+                        }
+                        return;
+                    }
                 }
             }
             return;
@@ -1432,14 +1930,256 @@ fn themePickerHandleKeyCreator(self: *Surface, event: input.KeyEvent) !void {
     }
 }
 
+/// Open the OS native color picker for a specific creator field.
+fn themePickerOpenColorPickerForField(self: *Surface, field_idx: usize) !void {
+    const picker = &(self.theme_picker orelse return);
+    const creator = &(picker.creator orelse return);
+    if (field_idx >= 1 and field_idx <= 22) {
+        const color = switch (field_idx) {
+            1 => creator.background,
+            2 => creator.foreground,
+            3...18 => creator.palette[field_idx - 3],
+            19 => creator.cursor_color,
+            20 => creator.cursor_text,
+            21 => creator.selection_bg,
+            22 => creator.selection_fg,
+            else => unreachable,
+        };
+        _ = try self.rt_app.performAction(
+            .{ .surface = self },
+            .open_color_picker,
+            .{
+                .r = color[0],
+                .g = color[1],
+                .b = color[2],
+            },
+        );
+        creator.pending_color_picker = field_idx;
+    }
+}
+
+/// Handle mouse clicks specifically when the theme picker is active.
+fn themePickerHandleMouseClick(self: *Surface) !bool {
+    const picker = &(self.theme_picker orelse return false);
+    const grid = self.size.grid();
+    const cols: usize = @intCast(grid.columns);
+    const start_row: usize = picker.start_row;
+    const content_width = @min(cols, @as(usize, 70));
+    const start_col = (cols -| content_width) / 2;
+
+    const pos = try self.rt_surface.getCursorPos();
+    const cell = self.posToViewport(pos.x, pos.y);
+
+    const click_row = cell.y;
+    const click_col = cell.x;
+
+    // 1. Check if click is outside the box
+    if (click_row < start_row or click_row >= start_row + picker.height or
+        click_col < start_col or click_col >= start_col + content_width)
+    {
+        // Clicked outside - close the picker
+        self.themePickerRestore();
+        self.themePickerClose();
+        return true;
+    }
+
+    if (picker.mode == .browse) {
+        // Browse mode click handling
+        if (click_row == start_row) {
+            // Header row - check tabs
+            const tab_col = start_col + content_width - 20;
+            if (click_col >= tab_col and click_col < tab_col + 5) {
+                picker.sort_tab = .all;
+                try self.themePickerFilter();
+            } else if (click_col >= tab_col + 6 and click_col < tab_col + 11) {
+                picker.sort_tab = .favorites;
+                try self.themePickerFilter();
+            } else if (click_col >= tab_col + 12 and click_col < tab_col + 17) {
+                picker.sort_tab = .created;
+                try self.themePickerFilter();
+            }
+        } else if (click_row >= start_row + 3 and click_row < start_row + picker.height - 2) {
+            // Theme list click
+            const list_idx = picker.scroll_offset + (click_row - (start_row + 3));
+            if (list_idx < picker.filtered.items.len) {
+                if (list_idx == picker.selected) {
+                    const idx = picker.filtered.items[list_idx];
+                    self.themePickerApply(picker.themes[idx]);
+                    return true;
+                } else {
+                    picker.selected = list_idx;
+                    const idx = picker.filtered.items[list_idx];
+                    self.themePickerPreview(picker.themes[idx]);
+                }
+            }
+        } else if (click_row == start_row + picker.height - 2) {
+            // Opacity slider row
+            const label_len = 9; // "Opacity: "
+            const slider_start = start_col + 2 + label_len;
+            if (click_col >= slider_start and click_col <= slider_start + 20) {
+                const pct = @as(f64, @floatFromInt(click_col - slider_start)) / 20.0;
+                picker.opacity = @max(0.15, @min(1.0, pct));
+                if (picker.filtered.items.len > 0) {
+                    const idx = picker.filtered.items[picker.selected];
+                    self.themePickerPreview(picker.themes[idx]);
+                }
+            } else if (click_col >= start_col + 35 and click_col <= start_col + 50) {
+                // Clicked [Ctrl+N create]
+                picker.mode = .creator;
+                if (picker.creator == null) {
+                    try self.themePickerInitCreator();
+                }
+            }
+        }
+    } else {
+        // Creator mode click handling
+        const creator = &(picker.creator orelse return false);
+        const draw_col = start_col + 2;
+        const relative_row = click_row - start_row;
+
+        creator.status_msg = null;
+
+        if (relative_row == 1) {
+            // Name or Opacity
+            if (click_col < draw_col + 25) {
+                creator.focused_field = 0;
+            } else {
+                creator.focused_field = 23;
+                const op_col = draw_col + 30;
+                const label_len = 10; // "Opacity: "
+                const slider_start = op_col + label_len;
+                if (click_col >= slider_start and click_col <= slider_start + 12) {
+                    const pct = @as(f64, @floatFromInt(click_col - slider_start)) / 12.0;
+                    creator.opacity = @max(0.15, @min(1.0, pct));
+                    self.themePickerPreviewFromCreator();
+                }
+            }
+        } else if (relative_row == 4) {
+            // BG + FG
+            if (click_col < draw_col + 30) {
+                creator.focused_field = 1;
+                try self.themePickerOpenColorPickerForField(1);
+            } else {
+                creator.focused_field = 2;
+                try self.themePickerOpenColorPickerForField(2);
+            }
+        } else if (relative_row >= 7 and relative_row <= 10) {
+            // Palette (4 rows: 7, 8, 9, 10)
+            const p_row = relative_row - 7;
+            const p_col = (click_col -| draw_col) / 16;
+            const pi = p_row * 4 + p_col;
+            if (pi < 16) {
+                creator.focused_field = 3 + pi;
+                try self.themePickerOpenColorPickerForField(3 + pi);
+            }
+        } else if (relative_row == 13) {
+            // Cursor + Cursor Text
+            if (click_col < draw_col + 30) {
+                creator.focused_field = 19;
+                try self.themePickerOpenColorPickerForField(19);
+            } else {
+                creator.focused_field = 20;
+                try self.themePickerOpenColorPickerForField(20);
+            }
+        } else if (relative_row == 14) {
+            // Selection BG + FG
+            if (click_col < draw_col + 30) {
+                creator.focused_field = 21;
+                try self.themePickerOpenColorPickerForField(21);
+            } else {
+                creator.focused_field = 22;
+                try self.themePickerOpenColorPickerForField(22);
+            }
+        } else if (relative_row == 18) {
+            // Instructions click
+            if (click_col >= draw_col + 26 and click_col < draw_col + 37) {
+                self.themePickerSaveCreator();
+            } else if (click_col >= draw_col + 40 and click_col < draw_col + 48) {
+                picker.mode = .browse;
+                if (picker.filtered.items.len > 0) {
+                    const idx = picker.filtered.items[picker.selected];
+                    self.themePickerPreview(picker.themes[idx]);
+                } else {
+                    self.themePickerRestore();
+                }
+            }
+        }
+    }
+
+    try self.themePickerRender();
+    try self.queueRender();
+    return true;
+}
+
+/// Handle mouse dragging specifically when the theme picker is active.
+fn themePickerHandleMouseDrag(self: *Surface) !bool {
+    const picker = &(self.theme_picker orelse return false);
+    const grid = self.size.grid();
+    const cols: usize = @intCast(grid.columns);
+    const start_row: usize = picker.start_row;
+    const content_width = @min(cols, @as(usize, 70));
+    const start_col = (cols -| content_width) / 2;
+
+    const pos = try self.rt_surface.getCursorPos();
+    const cell = self.posToViewport(pos.x, pos.y);
+
+    const click_row = cell.y;
+    const click_col = cell.x;
+
+    if (picker.mode == .browse) {
+        if (click_row == start_row + picker.height - 2) {
+            // Opacity slider row
+            const label_len = 9; // "Opacity: "
+            const slider_start = start_col + 2 + label_len;
+            if (click_col >= slider_start and click_col <= slider_start + 20) {
+                const pct = @as(f64, @floatFromInt(click_col - slider_start)) / 20.0;
+                picker.opacity = @max(0.15, @min(1.0, pct));
+                if (picker.filtered.items.len > 0) {
+                    const idx = picker.filtered.items[picker.selected];
+                    self.themePickerPreview(picker.themes[idx]);
+                }
+                try self.themePickerRender();
+                try self.queueRender();
+                return true;
+            }
+        }
+    } else {
+        const creator = &(picker.creator orelse return false);
+        const draw_col = start_col + 2;
+        const relative_row = click_row - start_row;
+
+        if (relative_row == 1) {
+            // Opacity slider row
+            const op_col = draw_col + 30;
+            const label_len = 10; // "Opacity: "
+            const slider_start = op_col + label_len;
+            if (click_col >= slider_start and click_col <= slider_start + 12) {
+                const pct = @as(f64, @floatFromInt(click_col - slider_start)) / 12.0;
+                creator.opacity = @max(0.15, @min(1.0, pct));
+                self.themePickerPreviewFromCreator();
+                try self.themePickerRender();
+                try self.queueRender();
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 /// Live preview from the current creator state.
-fn themePickerPreviewFromCreator(self: *Surface) !void {
+fn themePickerPreviewFromCreator(self: *Surface) void {
     const picker = &(self.theme_picker orelse return);
     const creator = &(picker.creator orelse return);
     const base = picker.base_config orelse return;
 
-    var config = try base.clone(self.alloc);
+    var config = base.clone(self.alloc) catch |err| {
+        log.err("failed to clone base config: {}", .{err});
+        return;
+    };
     defer config.deinit();
+
+    config.finalize() catch return;
 
     config.background = .{ .r = creator.background[0], .g = creator.background[1], .b = creator.background[2] };
     config.foreground = .{ .r = creator.foreground[0], .g = creator.foreground[1], .b = creator.foreground[2] };
@@ -1456,7 +2196,6 @@ fn themePickerPreviewFromCreator(self: *Surface) !void {
         };
     }
 
-    config.finalize() catch return;
     config.@"background-opacity" = creator.opacity;
 
     self.app.updateConfig(self.rt_app, &config) catch |err| {
@@ -1464,42 +2203,70 @@ fn themePickerPreviewFromCreator(self: *Surface) !void {
     };
 }
 
-/// Save the creator theme to ~/.config/ghostty/themes/<name>.ghostty.
-fn themePickerSaveCreator(self: *Surface) !void {
+/// Save the creator theme to ~/.config/ghostty/themes/<name>.
+fn themePickerSaveCreator(self: *Surface) void {
     const picker = &(self.theme_picker orelse return);
     const creator = &(picker.creator orelse return);
 
     const name = creator.name.items;
-    if (name.len == 0) return;
+    if (name.len == 0) {
+        creator.status_msg = "Error: Name cannot be empty";
+        return;
+    }
 
-    const config_dir_path = try configpkg.preferredDefaultFilePath(self.alloc);
-    defer self.alloc.free(config_dir_path);
-    const config_dir = std.fs.path.dirname(config_dir_path) orelse return;
-    const themes_dir = try std.fs.path.join(self.alloc, &.{ config_dir, "themes" });
-    defer self.alloc.free(themes_dir);
-    try std.fs.cwd().makePath(themes_dir);
+    const filepath = save_blk: {
+        const themes_dir = themepkg.Location.user.dir(self.alloc) catch |err| {
+            log.warn("failed to get themes directory: {}", .{err});
+            creator.status_msg = "Error: Out of memory";
+            return;
+        } orelse {
+            creator.status_msg = "Error: Failed to locate themes directory";
+            return;
+        };
+        defer self.alloc.free(themes_dir);
 
-    const filename = try std.fmt.allocPrint(self.alloc, "{s}.ghostty", .{name});
-    defer self.alloc.free(filename);
-    const filepath = try std.fs.path.join(self.alloc, &.{ themes_dir, filename });
+        std.fs.cwd().makePath(themes_dir) catch |err| {
+            log.warn("failed to create themes dir: {}", .{err});
+            creator.status_msg = "Error: Failed to create themes directory";
+            return;
+        };
+
+        const filename = self.alloc.dupe(u8, name) catch {
+            creator.status_msg = "Error: Out of memory";
+            return;
+        };
+        defer self.alloc.free(filename);
+        break :save_blk std.fs.path.join(self.alloc, &.{ themes_dir, filename }) catch {
+            creator.status_msg = "Error: Out of memory";
+            return;
+        };
+    };
     defer self.alloc.free(filepath);
 
-    var file = try std.fs.createFileAbsolute(filepath, .{ .truncate = true });
+    var file = std.fs.createFileAbsolute(filepath, .{ .truncate = true }) catch |err| {
+        log.warn("failed to create file: {}", .{err});
+        creator.status_msg = "Error: Failed to create theme file";
+        return;
+    };
     defer file.close();
+
     var buf: [2048]u8 = undefined;
     var fw = file.writer(&buf);
     const w = &fw.interface;
 
-    try w.print("background = #{x:0>2}{x:0>2}{x:0>2}\n", .{ creator.background[0], creator.background[1], creator.background[2] });
-    try w.print("foreground = #{x:0>2}{x:0>2}{x:0>2}\n", .{ creator.foreground[0], creator.foreground[1], creator.foreground[2] });
-    try w.print("cursor-color = #{x:0>2}{x:0>2}{x:0>2}\n", .{ creator.cursor_color[0], creator.cursor_color[1], creator.cursor_color[2] });
-    try w.print("cursor-text = #{x:0>2}{x:0>2}{x:0>2}\n", .{ creator.cursor_text[0], creator.cursor_text[1], creator.cursor_text[2] });
-    try w.print("selection-background = #{x:0>2}{x:0>2}{x:0>2}\n", .{ creator.selection_bg[0], creator.selection_bg[1], creator.selection_bg[2] });
-    try w.print("selection-foreground = #{x:0>2}{x:0>2}{x:0>2}\n", .{ creator.selection_fg[0], creator.selection_fg[1], creator.selection_fg[2] });
+    w.print("background = #{x:0>2}{x:0>2}{x:0>2}\n", .{ creator.background[0], creator.background[1], creator.background[2] }) catch {};
+    w.print("foreground = #{x:0>2}{x:0>2}{x:0>2}\n", .{ creator.foreground[0], creator.foreground[1], creator.foreground[2] }) catch {};
+    w.print("cursor-color = #{x:0>2}{x:0>2}{x:0>2}\n", .{ creator.cursor_color[0], creator.cursor_color[1], creator.cursor_color[2] }) catch {};
+    w.print("cursor-text = #{x:0>2}{x:0>2}{x:0>2}\n", .{ creator.cursor_text[0], creator.cursor_text[1], creator.cursor_text[2] }) catch {};
+    w.print("selection-background = #{x:0>2}{x:0>2}{x:0>2}\n", .{ creator.selection_bg[0], creator.selection_bg[1], creator.selection_bg[2] }) catch {};
+    w.print("selection-foreground = #{x:0>2}{x:0>2}{x:0>2}\n", .{ creator.selection_fg[0], creator.selection_fg[1], creator.selection_fg[2] }) catch {};
     for (0..16) |i| {
-        try w.print("palette = {d}=#{x:0>2}{x:0>2}{x:0>2}\n", .{ i, creator.palette[i][0], creator.palette[i][1], creator.palette[i][2] });
+        w.print("palette = {d}=#{x:0>2}{x:0>2}{x:0>2}\n", .{ i, creator.palette[i][0], creator.palette[i][1], creator.palette[i][2] }) catch {};
     }
-    try w.print("background-opacity = {d:.2}\n", .{creator.opacity});
+    w.print("background-opacity = {d:.2}\n", .{creator.opacity}) catch {};
+    w.flush() catch |err| {
+        log.warn("failed to flush theme file: {}", .{err});
+    };
 
     if (picker.meta) |*meta| {
         meta.addCreation(name) catch |err| {
@@ -1508,6 +2275,88 @@ fn themePickerSaveCreator(self: *Surface) !void {
     }
 
     log.info("saved creator theme to {s}", .{filepath});
+    creator.status_msg = "Theme saved successfully!";
+
+    self.themePickerReloadThemes() catch |err| {
+        log.warn("failed to reload themes after save: {}", .{err});
+    };
+
+    const theme_entry = ThemePicker.ThemeEntry{
+        .name = name,
+        .path = filepath,
+    };
+    self.themePickerApply(theme_entry);
+}
+
+/// Reload discovered themes in the theme picker.
+fn themePickerReloadThemes(self: *Surface) !void {
+    const picker = &(self.theme_picker orelse return);
+
+    var arena = std.heap.ArenaAllocator.init(self.alloc);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    var themes: std.ArrayListUnmanaged(ThemePicker.ThemeEntry) = .empty;
+    defer themes.deinit(arena_alloc);
+
+    var loc_it: themepkg.LocationIterator = .{ .arena_alloc = arena_alloc };
+    while (try loc_it.next()) |loc| {
+        var dir = std.fs.cwd().openDir(loc.dir, .{ .iterate = true }) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => {
+                log.warn("error opening theme dir {s}: {}", .{ loc.dir, err });
+                continue;
+            },
+        };
+        defer dir.close();
+
+        var walker = dir.iterate();
+        while (try walker.next()) |entry| {
+            if (entry.kind != .file and entry.kind != .sym_link) continue;
+            if (std.mem.eql(u8, entry.name, ".DS_Store")) continue;
+
+            const path = try std.fs.path.join(arena_alloc, &.{ loc.dir, entry.name });
+            try themes.append(arena_alloc, .{
+                .name = try arena_alloc.dupe(u8, entry.name),
+                .path = path,
+            });
+        }
+    }
+
+    if (themes.items.len == 0) return;
+
+    // Sort themes by name
+    std.mem.sortUnstable(ThemePicker.ThemeEntry, themes.items, {}, ThemePicker.ThemeEntry.lessThan);
+
+    // Free old themes
+    for (picker.themes) |t| {
+        self.alloc.free(t.name);
+        self.alloc.free(t.path);
+    }
+    self.alloc.free(picker.themes);
+
+    // Copy new themes
+    const theme_count = themes.items.len;
+    const themes_slice = try self.alloc.alloc(ThemePicker.ThemeEntry, theme_count);
+    errdefer {
+        for (themes_slice) |t| {
+            self.alloc.free(t.name);
+            self.alloc.free(t.path);
+        }
+        self.alloc.free(themes_slice);
+    }
+
+    for (themes.items, 0..) |t, i| {
+        themes_slice[i] = .{
+            .name = try self.alloc.dupe(u8, t.name),
+            .path = try self.alloc.dupe(u8, t.path),
+        };
+    }
+
+    picker.themes = themes_slice;
+
+    // Re-filter the list to include the new theme
+    try self.themePickerFilter();
 }
 
 /// Mouse state for the surface.
@@ -2458,6 +3307,31 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
                 .search_selected,
                 .{ .selected = v },
             );
+        },
+
+        .color_picker_result => |result| {
+            if (self.theme_picker) |*picker| {
+                if (picker.creator) |*creator| {
+                    if (creator.pending_color_picker) |field_idx| {
+                        const new_color = [3]u8{ result.r, result.g, result.b };
+                        switch (field_idx) {
+                            1 => creator.background = new_color,
+                            2 => creator.foreground = new_color,
+                            3...18 => creator.palette[field_idx - 3] = new_color,
+                            19 => creator.cursor_color = new_color,
+                            20 => creator.cursor_text = new_color,
+                            21 => creator.selection_bg = new_color,
+                            22 => creator.selection_fg = new_color,
+                            else => {},
+                        }
+                        self.themePickerPreviewFromCreator();
+                        self.themePickerRender() catch |err| {
+                            log.warn("failed to render theme picker: {}", .{err});
+                        };
+                        self.queueRender() catch {};
+                    }
+                }
+            }
         },
     }
 }
@@ -5056,6 +5930,14 @@ pub fn mouseButtonCallback(
     button: input.MouseButton,
     mods: input.Mods,
 ) !bool {
+    // If the theme picker is active, handle the mouse click ourselves.
+    if (self.theme_picker != null) {
+        if (action == .press and button == .left) {
+            _ = try self.themePickerHandleMouseClick();
+        }
+        return true; // Consume the event
+    }
+
     // Crash metadata in case we crash in here
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
@@ -5817,6 +6699,15 @@ pub fn cursorPosCallback(
     pos: apprt.CursorPos,
     mods: ?input.Mods,
 ) !void {
+    // If the theme picker is active, handle dragging
+    if (self.theme_picker != null) {
+        const left_pressed = self.mouse.click_state[@intCast(@intFromEnum(input.MouseButton.left))] == .press;
+        if (left_pressed) {
+            _ = try self.themePickerHandleMouseDrag();
+        }
+        return;
+    }
+
     // Crash metadata in case we crash in here
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;

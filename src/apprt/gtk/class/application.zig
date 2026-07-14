@@ -723,6 +723,8 @@ pub const Application = extern struct {
 
             .open_url => Action.openUrl(self, value),
 
+            .open_color_picker => return Action.openColorPicker(target, value),
+
             .pwd => Action.pwd(target, value),
 
             .present_terminal => return Action.presentTerminal(target),
@@ -2838,6 +2840,62 @@ const Action = struct {
                 };
                 return true;
             },
+        }
+    }
+
+    pub fn openColorPicker(
+        target: apprt.Target,
+        value: apprt.Action.Value(.open_color_picker),
+    ) bool {
+        switch (target) {
+            .app => return false,
+            .surface => |core| {
+                const surface = core.rt_surface.surface;
+                const widget = surface.as(gtk.Widget);
+                const root = gtk.Widget.getRoot(widget) orelse return false;
+                const window = gobject.ext.cast(gtk.Window, root) orelse return false;
+
+                const dialog = gtk.ColorChooserDialog.new("Choose Color", window);
+                const initial_color = gdk.RGBA{
+                    .f_red = @as(f32, @floatFromInt(value.r)) / 255.0,
+                    .f_green = @as(f32, @floatFromInt(value.g)) / 255.0,
+                    .f_blue = @as(f32, @floatFromInt(value.b)) / 255.0,
+                    .f_alpha = 1.0,
+                };
+                dialog.as(gtk.ColorChooser).setRgba(&initial_color);
+
+                _ = gtk.Dialog.signals.response.connect(
+                    dialog.as(gtk.Dialog),
+                    *CoreSurface,
+                    signalColorPickerResponse,
+                    core,
+                    .{},
+                );
+
+                dialog.as(gtk.Window).present();
+                return true;
+            },
+        }
+    }
+
+    fn signalColorPickerResponse(
+        dialog: *gtk.ColorChooserDialog,
+        response_id: c_int,
+        core: *CoreSurface,
+    ) callconv(.c) void {
+        defer dialog.as(gtk.Window).destroy();
+
+        if (response_id == -5) { // GTK_RESPONSE_OK
+            var rgba: gdk.RGBA = undefined;
+            dialog.as(gtk.ColorChooser).getRgba(&rgba);
+            const r = @as(u8, @intFromFloat(@round(rgba.f_red * 255.0)));
+            const g = @as(u8, @intFromFloat(@round(rgba.f_green * 255.0)));
+            const b = @as(u8, @intFromFloat(@round(rgba.f_blue * 255.0)));
+            core.handleMessage(.{ .color_picker_result = .{
+                .r = r,
+                .g = g,
+                .b = b,
+            } }) catch {};
         }
     }
 };
